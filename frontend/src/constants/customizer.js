@@ -73,9 +73,6 @@ const CATEGORY_PRINT_AREAS = {
     "right-sleeve": { left: 116, top: 148, width: 96, height: 118 },
     sleeve: { left: 116, top: 148, width: 96, height: 118 }
   },
-  handkershiefs: {
-    front: { left: 54, top: 118, width: 222, height: 192 }
-  },
   "pillow covers": {
     front: { left: 50, top: 102, width: 230, height: 220 },
     back: { left: 50, top: 102, width: 230, height: 220 }
@@ -110,8 +107,8 @@ const CATEGORY_ALIASES = {
   handkerchiefs: "handkerchief",
   jersey: "jerseys",
   "pillow cover": "pillow covers",
-  handkerschief: "handkershiefs",
-  handkerschiefs: "handkershiefs"
+  handkerschief: "handkershief",
+  handkerschiefs: "handkershief"
 };
 
 const normalizeCategoryKey = (category) =>

@@ -60,9 +60,6 @@ const CATEGORY_PRINTABLE_PRESETS = {
     "right-sleeve": { x: 116, y: 148, width: 96, height: 118 },
     sleeve: { x: 116, y: 148, width: 96, height: 118 }
   },
-  handkershiefs: {
-    front: { x: 54, y: 118, width: 222, height: 192 }
-  },
   "pillow-covers": {
     front: { x: 50, y: 102, width: 230, height: 220 },
     back: { x: 50, y: 102, width: 230, height: 220 }
@@ -142,12 +139,6 @@ export const DEFAULT_CATEGORY_CONFIGS = [
     supportsSizes: true,
     allowedSizes: SIZE_OPTIONS,
     customizationSides: ["Front", "Back", "Left Sleeve", "Right Sleeve"]
-  },
-  {
-    name: "Handkershiefs",
-    supportsSizes: false,
-    allowedSizes: [],
-    customizationSides: ["Front"]
   },
   {
     name: "pillow covers",

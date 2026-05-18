@@ -2,8 +2,6 @@ import { SIDE_OPTIONS, getPrintableArea, normalizeSideKey } from "../constants/c
 
 const CATEGORY_FALLBACK_SIDES = {
   handkerchief: ["front"],
-  handkerchiefs: ["front"],
-  handkershiefs: ["front"],
   "tote bag": ["front", "back"],
   "pillow covers": ["front", "back"],
   cup: ["front", "back"],
