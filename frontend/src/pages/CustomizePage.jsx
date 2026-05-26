@@ -132,7 +132,7 @@ const CustomizePage = () => {
             <p className="text-xs uppercase tracking-[0.15em] text-slate-500">Customize Product</p>
             <h1 className="font-heading text-xl font-semibold text-slate-900">{product.name}</h1>
             <p className="mt-1 text-sm text-slate-600">
-              {product.category} - ${Number(product.price).toFixed(2)}
+              {product.category} - NPR {Number(product.price).toFixed(2)}
             </p>
           </div>
           <Link to="/products" className="text-xs font-semibold text-brand-700 hover:text-brand-800">

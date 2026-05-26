@@ -1,14 +1,20 @@
 import cors from "cors";
 import express from "express";
 import adminRoutes from "./routes/adminRoutes.js";
+import authRoutes from "./routes/authRoutes.js";
+import cartRoutes from "./routes/cartRoutes.js";
 import categoryRoutes from "./routes/categoryRoutes.js";
 import designRoutes from "./routes/designRoutes.js";
+import draftRoutes from "./routes/draftRoutes.js";
 import orderRoutes from "./routes/orderRoutes.js";
 import productRoutes from "./routes/productRoutes.js";
 import { env } from "./config/env.js";
 import { errorHandler } from "./middleware/errorHandler.js";
+import { requestLogger } from "./middleware/requestLogger.js";
 
 const app = express();
+
+app.use(requestLogger);
 
 app.use(
   cors({
@@ -31,9 +37,12 @@ app.get("/health", (req, res) => {
 });
 
 app.use(adminRoutes);
+app.use(authRoutes);
 app.use(categoryRoutes);
 app.use(productRoutes);
 app.use(designRoutes);
+app.use(cartRoutes);
+app.use(draftRoutes);
 app.use(orderRoutes);
 
 app.use(errorHandler);

@@ -3,19 +3,19 @@ import ProtectedRoute from "./components/ProtectedRoute.jsx";
 import AdminDashboardPage from "./pages/AdminDashboardPage.jsx";
 import AdminLoginPage from "./pages/AdminLoginPage.jsx";
 
-const App = () => (
+const AdminRoutes = () => (
   <Routes>
-    <Route path="/login" element={<AdminLoginPage />} />
+    <Route path="login" element={<AdminLoginPage />} />
     <Route
-      path="/"
+      index
       element={
         <ProtectedRoute>
           <AdminDashboardPage />
         </ProtectedRoute>
       }
     />
-    <Route path="*" element={<Navigate to="/" replace />} />
+    <Route path="*" element={<Navigate to="/admin" replace />} />
   </Routes>
 );
 
-export default App;
+export default AdminRoutes;

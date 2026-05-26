@@ -1,5 +1,11 @@
 import { apiClient } from "./client.js";
 
+const withAuth = (token = "") => ({
+  headers: {
+    Authorization: `Bearer ${token}`
+  }
+});
+
 export const fetchProducts = async ({ search = "", category = "", size = "" } = {}) => {
   const { data } = await apiClient.get("/products", {
     params: {
@@ -52,5 +58,95 @@ export const uploadDesign = async ({
 
 export const createOrder = async (payload) => {
   const { data } = await apiClient.post("/order", payload);
+  return data;
+};
+
+export const registerUser = async (payload) => {
+  const { data } = await apiClient.post("/auth/register", payload);
+  return data;
+};
+
+export const loginUser = async (payload) => {
+  const { data } = await apiClient.post("/auth/login", payload);
+  return data;
+};
+
+export const forgotPassword = async (payload) => {
+  const { data } = await apiClient.post("/auth/forgot-password", payload);
+  return data;
+};
+
+export const fetchCurrentUser = async (token) => {
+  const { data } = await apiClient.get("/auth/me", withAuth(token));
+  return data;
+};
+
+export const updateProfile = async ({ token, payload }) => {
+  const { data } = await apiClient.put("/auth/profile", payload, withAuth(token));
+  return data;
+};
+
+export const updateProfilePassword = async ({ token, payload }) => {
+  const { data } = await apiClient.put("/auth/password", payload, withAuth(token));
+  return data;
+};
+
+export const fetchCartItems = async (token) => {
+  const { data } = await apiClient.get("/cart/items", withAuth(token));
+  return data;
+};
+
+export const addCartItem = async ({ token, payload }) => {
+  const { data } = await apiClient.post("/cart/items", payload, withAuth(token));
+  return data;
+};
+
+export const updateCartItem = async ({ token, itemId, payload }) => {
+  const { data } = await apiClient.put(`/cart/items/${itemId}`, payload, withAuth(token));
+  return data;
+};
+
+export const deleteCartItem = async ({ token, itemId }) => {
+  const { data } = await apiClient.delete(`/cart/items/${itemId}`, withAuth(token));
+  return data;
+};
+
+export const clearCart = async (token) => {
+  const { data } = await apiClient.delete("/cart/items", withAuth(token));
+  return data;
+};
+
+export const mergeGuestCart = async ({ token, items }) => {
+  const { data } = await apiClient.post("/cart/merge", { items }, withAuth(token));
+  return data;
+};
+
+export const fetchDrafts = async (token) => {
+  const { data } = await apiClient.get("/drafts", withAuth(token));
+  return data;
+};
+
+export const fetchDraftByProduct = async ({ token, productId }) => {
+  const { data } = await apiClient.get(`/drafts/${productId}`, withAuth(token));
+  return data;
+};
+
+export const saveDraft = async ({ token, productId, payload }) => {
+  const { data } = await apiClient.put(`/drafts/${productId}`, payload, withAuth(token));
+  return data;
+};
+
+export const deleteDraft = async ({ token, productId }) => {
+  const { data } = await apiClient.delete(`/drafts/${productId}`, withAuth(token));
+  return data;
+};
+
+export const createUserOrder = async ({ token, payload }) => {
+  const { data } = await apiClient.post("/orders", payload, withAuth(token));
+  return data;
+};
+
+export const fetchMyOrders = async (token) => {
+  const { data } = await apiClient.get("/orders/my", withAuth(token));
   return data;
 };

@@ -2,12 +2,14 @@ import { NavLink } from "react-router-dom";
 
 const tabs = [
   { to: "/", label: "Home" },
-  { to: "/products", label: "Products" }
+  { to: "/products", label: "Products" },
+  { to: "/cart", label: "Cart" },
+  { to: "/orders", label: "Orders" }
 ];
 
 const MobileBottomNav = () => (
   <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 backdrop-blur md:hidden">
-    <div className="grid grid-cols-2 gap-2 px-3 pb-[calc(0.55rem+env(safe-area-inset-bottom))] pt-2">
+    <div className="grid grid-cols-4 gap-2 px-3 pb-[calc(0.55rem+env(safe-area-inset-bottom))] pt-2">
       {tabs.map((tab) => (
         <NavLink
           key={tab.to}

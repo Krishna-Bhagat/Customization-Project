@@ -13,7 +13,7 @@ const AdminLoginPage = () => {
   const [errorMessage, setErrorMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const redirectTo = location.state?.from?.pathname || "/";
+  const redirectTo = location.state?.from?.pathname || "/admin";
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -33,7 +33,7 @@ const AdminLoginPage = () => {
 
   useEffect(() => {
     if (isAuthenticated) {
-      navigate("/", { replace: true });
+      navigate("/admin", { replace: true });
     }
   }, [isAuthenticated, navigate]);
 

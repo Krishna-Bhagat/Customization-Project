@@ -10,6 +10,11 @@ const ProductsPage = lazy(() => import("./pages/ProductsPage.jsx"));
 const ProductDetailPage = lazy(() => import("./pages/ProductDetailPage.jsx"));
 const CustomizerWorkspacePage = lazy(() => import("./pages/CustomizerWorkspacePage.jsx"));
 const ReviewCheckoutPage = lazy(() => import("./pages/ReviewCheckoutPage.jsx"));
+const CartPage = lazy(() => import("./pages/CartPage.jsx"));
+const CheckoutPage = lazy(() => import("./pages/CheckoutPage.jsx"));
+const ProfilePage = lazy(() => import("./pages/ProfilePage.jsx"));
+const MyOrdersPage = lazy(() => import("./pages/MyOrdersPage.jsx"));
+const AdminRoutes = lazy(() => import("./admin/AdminRoutes.jsx"));
 
 const LegacyCustomizeRedirect = () => {
   const { id } = useParams();
@@ -18,36 +23,45 @@ const LegacyCustomizeRedirect = () => {
 
 const App = () => {
   const location = useLocation();
+  const isAdminRoute = /^\/admin(?:\/.*)?$/.test(location.pathname);
   const isProductDetailPage = /^\/product\/[^/]+\/?$/.test(location.pathname);
   const isWorkspacePage = /^\/customize\/[^/]+\/workspace\/?$/.test(location.pathname);
   const isCheckoutPage = /^\/customize\/[^/]+\/checkout\/?$/.test(location.pathname);
   const isProductFlowPage = isProductDetailPage || isWorkspacePage || isCheckoutPage;
   const isImmersiveFlowPage = isWorkspacePage || isCheckoutPage;
+  const isCustomerChromeVisible = !isAdminRoute && !isProductFlowPage;
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      {!isImmersiveFlowPage ? <Navbar /> : null}
+    <div className={isAdminRoute ? "min-h-screen bg-slate-100" : "min-h-screen bg-slate-50"}>
+      {!isAdminRoute && !isImmersiveFlowPage ? <Navbar /> : null}
       <main
         className={
-          isImmersiveFlowPage
+          isAdminRoute
+            ? "w-full"
+            : isImmersiveFlowPage
             ? "w-full"
             : "mx-auto w-full max-w-7xl px-4 pb-28 pt-5 sm:px-6 lg:px-8"
         }
       >
         <Suspense fallback={<PageSkeleton />}>
           <Routes>
+            <Route path="/admin/*" element={<AdminRoutes />} />
             <Route path="/" element={<HomePage />} />
             <Route path="/products" element={<ProductsPage />} />
             <Route path="/product/:id" element={<ProductDetailPage />} />
             <Route path="/customize/:id/workspace" element={<CustomizerWorkspacePage />} />
             <Route path="/customize/:id/checkout" element={<ReviewCheckoutPage />} />
+            <Route path="/cart" element={<CartPage />} />
+            <Route path="/checkout" element={<CheckoutPage />} />
+            <Route path="/profile" element={<ProfilePage />} />
+            <Route path="/orders" element={<MyOrdersPage />} />
             <Route path="/customize/:id" element={<LegacyCustomizeRedirect />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Suspense>
       </main>
-      {!isProductFlowPage ? <SiteFooter /> : null}
-      {!isProductFlowPage ? <MobileBottomNav /> : null}
+      {isCustomerChromeVisible ? <SiteFooter /> : null}
+      {isCustomerChromeVisible ? <MobileBottomNav /> : null}
     </div>
   );
 };

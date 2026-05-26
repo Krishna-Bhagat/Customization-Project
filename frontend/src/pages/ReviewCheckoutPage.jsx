@@ -503,15 +503,15 @@ const ReviewCheckoutPage = () => {
           <div className="mt-2 border-t border-slate-200 pt-2">
             <div className="flex items-center justify-between">
               <span>Subtotal</span>
-              <span>${subtotal.toFixed(2)}</span>
+              <span>NPR {subtotal.toFixed(2)}</span>
             </div>
             <div className="mt-1 flex items-center justify-between">
               <span>Shipping</span>
-              <span>{shipping === 0 ? "Free" : `$${shipping.toFixed(2)}`}</span>
+              <span>{shipping === 0 ? "Free" : `NPR ${shipping.toFixed(2)}`}</span>
             </div>
             <div className="mt-1 flex items-center justify-between text-base font-semibold text-slate-900">
               <span>Total</span>
-              <span>${total.toFixed(2)}</span>
+              <span>NPR {total.toFixed(2)}</span>
             </div>
           </div>
         </div>

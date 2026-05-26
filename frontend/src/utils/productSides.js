@@ -1,16 +1,5 @@
 import { SIDE_OPTIONS, getPrintableArea, normalizeSideKey } from "../constants/customizer.js";
 
-const CATEGORY_FALLBACK_SIDES = {
-  handkerchief: ["front"],
-  "tote bag": ["front", "back"],
-  "pillow covers": ["front", "back"],
-  cup: ["front", "back"],
-  cups: ["front", "back"],
-  mug: ["front", "back"],
-  keyring: ["front", "back"],
-  "key ring": ["front", "back"]
-};
-
 const SIDE_ALIASES = {
   leftsleeve: "left-sleeve",
   rightsleeve: "right-sleeve"
@@ -72,13 +61,11 @@ const normalizeArea = (area, category, sideKey) => {
 };
 
 const getFallbackSideKeys = (category) => {
-  const normalizedCategory = String(category || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ");
-
-  return CATEGORY_FALLBACK_SIDES[normalizedCategory] || ["front", "back"];
+  const normalizedCategory = String(category || "").toLowerCase();
+  if (normalizedCategory.includes("handkerchief")) {
+    return ["front"];
+  }
+  return ["front", "back"];
 };
 
 export const buildProductSideOptions = (product, { fallbackImage = "" } = {}) => {

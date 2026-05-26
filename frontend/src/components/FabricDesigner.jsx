@@ -1107,7 +1107,7 @@ const FabricDesigner = ({
               onClick={handleProceedCheckout}
               className="inline-flex min-h-11 items-center justify-center rounded-xl bg-brand-600 px-4 text-sm font-semibold text-white transition hover:bg-brand-700"
             >
-              Review
+              Add to Cart
             </button>
           </div>
 

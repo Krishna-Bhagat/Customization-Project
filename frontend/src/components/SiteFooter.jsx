@@ -42,19 +42,19 @@ const SiteFooter = () => (
           <h4 className="text-sm font-semibold uppercase tracking-[0.12em] text-slate-500">Social</h4>
           <ul className="mt-3 space-y-2 text-sm text-slate-600">
             <li>
-              <a href="#" className="hover:text-slate-900">
+              <button type="button" className="hover:text-slate-900">
                 Instagram
-              </a>
+              </button>
             </li>
             <li>
-              <a href="#" className="hover:text-slate-900">
+              <button type="button" className="hover:text-slate-900">
                 Pinterest
-              </a>
+              </button>
             </li>
             <li>
-              <a href="#" className="hover:text-slate-900">
+              <button type="button" className="hover:text-slate-900">
                 YouTube
-              </a>
+              </button>
             </li>
           </ul>
         </div>

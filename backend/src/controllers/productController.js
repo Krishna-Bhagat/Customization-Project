@@ -34,6 +34,33 @@ const parseObjectInput = (input) => {
   return {};
 };
 
+const parseArrayInput = (input) => {
+  if (Array.isArray(input)) {
+    return input;
+  }
+
+  if (typeof input === "string") {
+    const trimmed = input.trim();
+    if (!trimmed) {
+      return [];
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {
+      return trimmed
+        .split(",")
+        .map((token) => token.trim())
+        .filter(Boolean);
+    }
+  }
+
+  return [];
+};
+
 const toInt = (value, fallback) => {
   const parsed = Number.parseInt(value, 10);
   if (Number.isNaN(parsed)) {
@@ -54,6 +81,43 @@ const normalizePrintableArea = (candidate, fallbackArea = DEFAULT_PRINTABLE_AREA
     width,
     height
   };
+};
+
+const normalizeSearchSlug = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+
+const normalizeSearchSlugs = (input) => {
+  const values = parseArrayInput(input);
+  const unique = new Set();
+
+  values.forEach((value) => {
+    const slug = normalizeSearchSlug(value);
+    if (slug) {
+      unique.add(slug);
+    }
+  });
+
+  return Array.from(unique.values());
+};
+
+const buildDefaultSearchSlugs = ({ name, category }) => {
+  const candidates = [name, category];
+  const unique = new Set();
+
+  candidates.forEach((value) => {
+    const slug = normalizeSearchSlug(value);
+    if (slug) {
+      unique.add(slug);
+    }
+  });
+
+  return Array.from(unique.values());
 };
 
 const pickCategorySide = (allowedSides, requestedSide) => {
@@ -104,7 +168,18 @@ export const getProducts = async (req, res, next) => {
 
     if (search) {
       params.push(`%${search}%`);
-      conditions.push(`p.name ILIKE $${params.length}`);
+      conditions.push(`
+        (
+          p.name ILIKE $${params.length}
+          OR COALESCE(p.description, '') ILIKE $${params.length}
+          OR p.category ILIKE $${params.length}
+          OR EXISTS (
+            SELECT 1
+            FROM UNNEST(p.search_slugs) AS slug
+            WHERE slug ILIKE $${params.length}
+          )
+        )
+      `);
     }
 
     if (category) {
@@ -127,19 +202,10 @@ export const getProducts = async (req, res, next) => {
           p.description,
           p.category,
           p.price,
-          COALESCE(p.gallery_images[1], p.image_urls[1], p.image_url) AS "imageUrl",
-          CASE
-            WHEN p.gallery_images IS NOT NULL AND array_length(p.gallery_images, 1) IS NOT NULL THEN p.gallery_images
-            WHEN p.image_urls IS NOT NULL AND array_length(p.image_urls, 1) IS NOT NULL THEN p.image_urls
-            WHEN p.image_url IS NOT NULL AND TRIM(p.image_url) <> '' THEN ARRAY[p.image_url]::TEXT[]
-            ELSE ARRAY[]::TEXT[]
-          END AS "imageUrls",
-          CASE
-            WHEN p.gallery_images IS NOT NULL AND array_length(p.gallery_images, 1) IS NOT NULL THEN p.gallery_images
-            WHEN p.image_urls IS NOT NULL AND array_length(p.image_urls, 1) IS NOT NULL THEN p.image_urls
-            WHEN p.image_url IS NOT NULL AND TRIM(p.image_url) <> '' THEN ARRAY[p.image_url]::TEXT[]
-            ELSE ARRAY[]::TEXT[]
-          END AS "galleryImages",
+          p.search_slugs AS "searchSlugs",
+          COALESCE(p.gallery_images[1], '') AS "imageUrl",
+          COALESCE(p.gallery_images, ARRAY[]::TEXT[]) AS "imageUrls",
+          COALESCE(p.gallery_images, ARRAY[]::TEXT[]) AS "galleryImages",
           p.available_sizes AS "availableSizes",
           p.created_at AS "createdAt",
           COALESCE(
@@ -185,6 +251,7 @@ export const createProduct = async (req, res, next) => {
     const description =
       typeof req.body.description === "string" ? req.body.description.trim().slice(0, 2000) : "";
     const categoryInput = String(req.body.category || "").trim();
+    const requestedSearchSlugs = normalizeSearchSlugs(req.body.searchSlugs);
     const requestedSizes = parseSizesInput(req.body.availableSizes);
     const requestedSides = parseSidesInput(req.body.enabledSides);
     const sideConfigsInput = parseObjectInput(req.body.sideConfigs);
@@ -294,6 +361,14 @@ export const createProduct = async (req, res, next) => {
       });
     }
 
+    const searchSlugs =
+      requestedSearchSlugs.length > 0
+        ? requestedSearchSlugs
+        : buildDefaultSearchSlugs({
+            name,
+            category: matchedCategory.name
+          });
+
     const sideRowsInput = uniqueSelectedSideNames.map((sideName) => {
       const sideKey = toSideKey(sideName);
       const defaultArea = getPrintableAreaPreset({
@@ -368,9 +443,7 @@ export const createProduct = async (req, res, next) => {
 
     const galleryImages = uploadedGalleryImages;
 
-    const primaryImageUrl = galleryImages[0];
-
-    if (!primaryImageUrl) {
+    if (galleryImages.length === 0) {
       return res.status(400).json({
         message: "Upload at least one customer gallery image."
       });
@@ -385,21 +458,21 @@ export const createProduct = async (req, res, next) => {
           description,
           category,
           price,
-          image_url,
-          image_urls,
           gallery_images,
+          search_slugs,
           available_sizes
         )
-        VALUES ($1, $2, $3, $4, $5, $6::TEXT[], $7::TEXT[], $8::TEXT[])
+        VALUES ($1, $2, $3, $4, $5::TEXT[], $6::TEXT[], $7::TEXT[])
         RETURNING
           id,
           name,
           description,
           category,
           price,
-          COALESCE(gallery_images[1], image_urls[1], image_url) AS "imageUrl",
-          gallery_images AS "galleryImages",
-          gallery_images AS "imageUrls",
+          search_slugs AS "searchSlugs",
+          COALESCE(gallery_images[1], '') AS "imageUrl",
+          COALESCE(gallery_images, ARRAY[]::TEXT[]) AS "galleryImages",
+          COALESCE(gallery_images, ARRAY[]::TEXT[]) AS "imageUrls",
           available_sizes AS "availableSizes",
           created_at AS "createdAt"
       `,
@@ -408,9 +481,8 @@ export const createProduct = async (req, res, next) => {
         description || null,
         matchedCategory.name,
         priceNumber,
-        primaryImageUrl,
         galleryImages,
-        galleryImages,
+        searchSlugs,
         selectedSizes
       ]
     );
@@ -530,7 +602,8 @@ export const updateProduct = async (req, res, next) => {
           p.description,
           p.category,
           p.price,
-          p.image_url AS "imageUrl",
+          p.search_slugs AS "searchSlugs",
+          COALESCE(p.gallery_images[1], '') AS "imageUrl",
           p.gallery_images AS "galleryImages",
           p.available_sizes AS "availableSizes",
           COALESCE(
@@ -582,6 +655,8 @@ export const updateProduct = async (req, res, next) => {
         ? req.body.description.trim().slice(0, 2000)
         : existingProduct.description || "";
     const categoryInput = String(req.body.category || existingProduct.category || "").trim();
+    const hasSearchSlugInput = req.body.searchSlugs !== undefined;
+    const requestedSearchSlugs = normalizeSearchSlugs(req.body.searchSlugs);
     const nextPriceRaw =
       req.body.price !== undefined && String(req.body.price).trim() !== ""
         ? req.body.price
@@ -667,6 +742,20 @@ export const updateProduct = async (req, res, next) => {
       });
     }
 
+    const nextSearchSlugs = hasSearchSlugInput
+      ? requestedSearchSlugs.length > 0
+        ? requestedSearchSlugs
+        : buildDefaultSearchSlugs({
+            name: nextName,
+            category: matchedCategory.name
+          })
+      : Array.isArray(existingProduct.searchSlugs) && existingProduct.searchSlugs.length > 0
+        ? existingProduct.searchSlugs
+        : buildDefaultSearchSlugs({
+            name: nextName,
+            category: matchedCategory.name
+          });
+
     const sideConfigsInput = parseObjectInput(req.body.sideConfigs);
 
     const resolvedSideRows = await Promise.all(
@@ -734,8 +823,6 @@ export const updateProduct = async (req, res, next) => {
       });
     }
 
-    const primaryImageUrl = nextGalleryImages[0];
-
     await client.query("BEGIN");
 
     const { rows: updatedProducts } = await client.query(
@@ -746,20 +833,20 @@ export const updateProduct = async (req, res, next) => {
           description = $2,
           category = $3,
           price = $4,
-          image_url = $5,
-          image_urls = $6::TEXT[],
-          gallery_images = $7::TEXT[],
-          available_sizes = $8::TEXT[]
-        WHERE id = $9
+          gallery_images = $5::TEXT[],
+          search_slugs = $6::TEXT[],
+          available_sizes = $7::TEXT[]
+        WHERE id = $8
         RETURNING
           id,
           name,
           description,
           category,
           price,
-          COALESCE(gallery_images[1], image_urls[1], image_url) AS "imageUrl",
-          gallery_images AS "galleryImages",
-          gallery_images AS "imageUrls",
+          search_slugs AS "searchSlugs",
+          COALESCE(gallery_images[1], '') AS "imageUrl",
+          COALESCE(gallery_images, ARRAY[]::TEXT[]) AS "galleryImages",
+          COALESCE(gallery_images, ARRAY[]::TEXT[]) AS "imageUrls",
           available_sizes AS "availableSizes",
           created_at AS "createdAt"
       `,
@@ -768,9 +855,8 @@ export const updateProduct = async (req, res, next) => {
         nextDescription || null,
         matchedCategory.name,
         nextPrice,
-        primaryImageUrl,
         nextGalleryImages,
-        nextGalleryImages,
+        nextSearchSlugs,
         selectedSizes,
         productId
       ]

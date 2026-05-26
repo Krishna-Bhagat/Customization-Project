@@ -10,6 +10,7 @@ const TAGLINES = {
   "polo shirt": "Smart casual, uniquely yours.",
   "jerseys": "Team energy, personalized spirit.",
   "pillow covers": "Warm homes, custom love.",
+  "handkershiefs": "Premium custom keepsakes.",
   "cup": "Sip with a personal story.",
   "cups": "Personalized moments in every sip.",
   "mug": "Meaningful mornings start here."

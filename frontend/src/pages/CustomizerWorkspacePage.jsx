@@ -1,13 +1,20 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { fetchProducts } from "../api/index.js";
+import { fetchDraftByProduct, fetchProducts, saveDraft } from "../api/index.js";
 import EmptyState from "../components/EmptyState.jsx";
 import FabricDesigner from "../components/FabricDesigner.jsx";
 import ProductSkeletonGrid from "../components/ProductSkeletonGrid.jsx";
 import StepProgress from "../components/StepProgress.jsx";
 import { useToast } from "../components/ToastProvider.jsx";
-import { readCustomizationSession, writeCustomizationSession } from "../utils/customizationSession.js";
+import { useCart } from "../context/CartContext.jsx";
+import { useUserAuth } from "../context/UserAuthContext.jsx";
+import {
+  dismissDraftImportPrompt,
+  isDraftImportDismissed,
+  readCustomizationSession,
+  writeCustomizationSession
+} from "../utils/customizationSession.js";
 import { buildProductSideOptions, formatSideLabel, toSideKey } from "../utils/productSides.js";
 
 const normalizeSelectedSides = (candidateSides, sideOptions) => {
@@ -130,6 +137,8 @@ const CustomizerWorkspacePage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const { pushToast } = useToast();
+  const { addToCart } = useCart();
+  const { token, isAuthenticated } = useUserAuth();
 
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
@@ -141,6 +150,8 @@ const CustomizerWorkspacePage = () => {
   const [activeSide, setActiveSide] = useState("front");
   const [canvasStates, setCanvasStates] = useState({});
   const [isProductSheetOpen, setIsProductSheetOpen] = useState(false);
+  const [showDraftImportPrompt, setShowDraftImportPrompt] = useState(false);
+  const [pendingLocalDraft, setPendingLocalDraft] = useState(null);
 
   useEffect(() => {
     const loadData = async () => {
@@ -169,7 +180,41 @@ const CustomizerWorkspacePage = () => {
           fallbackImage: productImages[0] || found.imageUrl || ""
         });
 
-        const session = readCustomizationSession(id) || {};
+        const localSession = readCustomizationSession(id) || {};
+        let serverDraft = null;
+
+        if (isAuthenticated && token) {
+          try {
+            const draftResponse = await fetchDraftByProduct({ token, productId: id });
+            serverDraft = draftResponse?.draft || null;
+          } catch {
+            serverDraft = null;
+          }
+        }
+
+        const session =
+          serverDraft && Number(serverDraft.savedAt || 0) > Number(localSession.savedAt || 0)
+            ? {
+                ...localSession,
+                ...serverDraft
+              }
+            : localSession;
+
+        if (
+          isAuthenticated &&
+          token &&
+          localSession &&
+          Object.keys(localSession).length > 0 &&
+          !serverDraft &&
+          !isDraftImportDismissed(id)
+        ) {
+          setPendingLocalDraft(localSession);
+          setShowDraftImportPrompt(true);
+        } else {
+          setPendingLocalDraft(null);
+          setShowDraftImportPrompt(false);
+        }
+
         const availableSizes = found.availableSizes || [];
         const normalizedSides = normalizeSelectedSides(session.selectedSides, sideOptions);
         const normalizedActiveSide = normalizedSides.includes(toSideKey(session.activeSide))
@@ -205,7 +250,7 @@ const CustomizerWorkspacePage = () => {
     };
 
     loadData();
-  }, [id]);
+  }, [id, isAuthenticated, token]);
 
   const productImageList = useMemo(() => {
     if (!product) {
@@ -224,6 +269,32 @@ const CustomizerWorkspacePage = () => {
       }),
     [product, productImageList]
   );
+
+  const persistDraftToServer = async (payload) => {
+    if (!isAuthenticated || !token || !product) {
+      return;
+    }
+
+    try {
+      await saveDraft({
+        token,
+        productId: id,
+        payload: {
+          selectedSize,
+          quantity,
+          selectedSides: payload.selectedSides || selectedSides,
+          activeSide: payload.activeSide || activeSide,
+          canvasStates: payload.canvasStates || {},
+          designExports: payload.designExports || {},
+          previewImage:
+            Object.values(payload.designExports || {}).find(Boolean) || "",
+          savedAt: Date.now()
+        }
+      });
+    } catch {
+      // Silent fallback: local draft remains available.
+    }
+  };
 
   useEffect(() => {
     if (!product) {
@@ -281,11 +352,135 @@ const CustomizerWorkspacePage = () => {
       designExports: payload.designExports || {},
       savedAt: Date.now()
     });
+
+    persistDraftToServer({
+      selectedSides: normalizedSelectedSides,
+      activeSide: resolvedActiveSide,
+      canvasStates: payload.canvasStates || {},
+      designExports: payload.designExports || {}
+    });
   };
 
-  const handleProceedCheckout = (payload) => {
+  const handleProceedCheckout = async (payload) => {
+    if ((product.availableSizes || []).length > 0 && !selectedSize) {
+      pushToast({ type: "error", message: "Please select a size before adding to cart." });
+      return;
+    }
+
     handleSaveSnapshot(payload);
-    navigate(`/customize/${id}/checkout`);
+
+    const normalizedSelectedSides = normalizeSelectedSides(selectedSides, sideOptions);
+    const cartPayload = {
+      productId: Number(id),
+      selectedSize,
+      quantity,
+      selectedSides: normalizedSelectedSides,
+      customizationState: {
+        selectedSize,
+        quantity,
+        selectedSides: normalizedSelectedSides,
+        activeSide: toSideKey(payload.activeSide || activeSide),
+        canvasStates: payload.canvasStates || {},
+        designExports: payload.designExports || {},
+        savedAt: Date.now()
+      },
+      previewImage: Object.values(payload.designExports || {}).find(Boolean) || "",
+      unitPrice: Number(product.price || 0),
+      product: {
+        id: Number(product.id),
+        name: product.name,
+        category: product.category,
+        description: product.description || "",
+        price: Number(product.price || 0),
+        imageUrl: productImageList[0] || product.imageUrl || "",
+        galleryImages: productImageList
+      }
+    };
+
+    try {
+      await addToCart(cartPayload);
+      pushToast({ type: "success", message: "Added to cart successfully." });
+      navigate("/cart");
+    } catch (error) {
+      pushToast({
+        type: "error",
+        message: error.response?.data?.message || "Unable to add item to cart."
+      });
+    }
+  };
+
+  const handleImportDraft = async () => {
+    if (!pendingLocalDraft || !product) {
+      setShowDraftImportPrompt(false);
+      return;
+    }
+
+    const availableSizes = product.availableSizes || [];
+    const normalizedSelectedSides = normalizeSelectedSides(pendingLocalDraft.selectedSides, sideOptions);
+    const normalizedActiveSide = normalizedSelectedSides.includes(toSideKey(pendingLocalDraft.activeSide))
+      ? toSideKey(pendingLocalDraft.activeSide)
+      : normalizedSelectedSides[0];
+    const normalizedCanvasStates = Object.entries(pendingLocalDraft.canvasStates || {}).reduce(
+      (acc, [side, snapshot]) => {
+        const sideKey = toSideKey(side);
+        if (sideKey) {
+          acc[sideKey] = snapshot;
+        }
+        return acc;
+      },
+      {}
+    );
+    const normalizedDesignExports = Object.entries(pendingLocalDraft.designExports || {}).reduce(
+      (acc, [side, dataUrl]) => {
+        const sideKey = toSideKey(side);
+        if (sideKey && dataUrl) {
+          acc[sideKey] = dataUrl;
+        }
+        return acc;
+      },
+      {}
+    );
+    const nextQuantity = Number(pendingLocalDraft.quantity) > 0 ? Number(pendingLocalDraft.quantity) : 1;
+    const nextSize =
+      availableSizes.length > 0
+        ? availableSizes.includes(pendingLocalDraft.selectedSize)
+          ? pendingLocalDraft.selectedSize
+          : availableSizes[0]
+        : "";
+
+    setSelectedSides(normalizedSelectedSides);
+    setActiveSide(normalizedActiveSide);
+    setCanvasStates(normalizedCanvasStates);
+    setQuantity(nextQuantity);
+    setSelectedSize(nextSize);
+
+    writeCustomizationSession(id, {
+      selectedSize: nextSize,
+      quantity: nextQuantity,
+      selectedSides: normalizedSelectedSides,
+      activeSide: normalizedActiveSide,
+      canvasStates: normalizedCanvasStates,
+      designExports: normalizedDesignExports,
+      savedAt: Date.now()
+    });
+
+    await persistDraftToServer({
+      selectedSides: normalizedSelectedSides,
+      activeSide: normalizedActiveSide,
+      canvasStates: normalizedCanvasStates,
+      designExports: normalizedDesignExports
+    });
+
+    dismissDraftImportPrompt(id);
+    setPendingLocalDraft(null);
+    setShowDraftImportPrompt(false);
+    pushToast({ type: "success", message: "Local draft imported successfully." });
+  };
+
+  const handleDismissDraftImport = () => {
+    dismissDraftImportPrompt(id);
+    setPendingLocalDraft(null);
+    setShowDraftImportPrompt(false);
   };
 
   const sideSummary = useMemo(
@@ -358,6 +553,31 @@ const CustomizerWorkspacePage = () => {
           <p className="font-semibold text-slate-800">{product.name}</p>
           <p className="mt-0.5">Print areas: {sideSummary}</p>
         </div>
+
+        {showDraftImportPrompt ? (
+          <div className="mt-3 rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm text-sky-800">
+            <p className="font-semibold">Import existing draft?</p>
+            <p className="mt-1 text-xs text-sky-700">
+              A local design draft was found for this product. Import it to your account draft storage.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={handleImportDraft}
+                className="inline-flex min-h-10 items-center justify-center rounded-lg bg-brand-600 px-3 text-xs font-semibold text-white transition hover:bg-brand-700"
+              >
+                Import Draft
+              </button>
+              <button
+                type="button"
+                onClick={handleDismissDraftImport}
+                className="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        ) : null}
       </header>
 
       <div className="mt-3">

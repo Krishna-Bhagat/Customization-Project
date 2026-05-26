@@ -12,8 +12,11 @@ backend/src/
     productMeta.js
   controllers/
     adminController.js
+    authController.js
+    cartController.js
     categoryController.js
     designController.js
+    draftController.js
     orderController.js
     productController.js
   db/
@@ -22,18 +25,24 @@ backend/src/
   middleware/
     adminAuth.js
     errorHandler.js
+    userAuth.js
   routes/
     adminRoutes.js
+    authRoutes.js
+    cartRoutes.js
     categoryRoutes.js
     designRoutes.js
+    draftRoutes.js
     orderRoutes.js
     productRoutes.js
   services/
     cloudinaryService.js
     emailService.js
   utils/
+    auth.js
     sizeParser.js
     sideParser.js
+    userProfile.js
 ```
 
 ## Responsibilities
@@ -65,19 +74,44 @@ backend/src/
 Update flow supports:
 
 - category/size changes
+- keyword search slug changes
 - side configuration changes
 - gallery replacement
 - side mockup replacement
 - visual printable area update persistence
+
+## User Commerce Domain
+
+Added production ecommerce user flows:
+
+- `authController.js`
+  - register/login/forgot-password
+  - profile read/update
+  - password update
+- `cartController.js`
+  - database cart item CRUD
+  - guest cart merge endpoint
+- `draftController.js`
+  - user draft list/get/upsert/delete by product
+- `orderController.js`
+  - authenticated order creation (`orders` + `order_items`)
+  - user order tracking API
+  - admin order list/stats/status update APIs
+  - legacy `/order` kept for backward compatibility
 
 ## Feature To File Map
 
 - Product CRUD + side/gallery validation: `controllers/productController.js`
 - Category CRUD + side/size rules: `controllers/categoryController.js`
 - Design upload endpoint: `controllers/designController.js`
-- Order email trigger: `controllers/orderController.js`
+- User auth + profile: `controllers/authController.js`
+- User cart persistence + merge: `controllers/cartController.js`
+- User draft persistence: `controllers/draftController.js`
+- Order lifecycle + admin order APIs: `controllers/orderController.js`
 - Cloudinary upload + HEIC conversion: `services/cloudinaryService.js`
-- SMTP transport + order email template: `services/emailService.js`
+- SMTP transport + admin/customer order email templates: `services/emailService.js`
+- User JWT/password helpers: `utils/auth.js`
+- User profile mapper: `utils/userProfile.js`
 - Side/size parser helpers: `utils/sideParser.js`, `utils/sizeParser.js`
 - Route registration: `routes/*.js`
 - Startup schema + defaults: `db/init.js`
@@ -106,3 +140,4 @@ Update flow supports:
 - Central error middleware in `middleware/errorHandler.js`.
 - Validation errors return explicit `400` messages.
 - Admin-protected routes use JWT middleware (`requireAdmin`).
+- User-protected routes use JWT middleware (`requireUser`).

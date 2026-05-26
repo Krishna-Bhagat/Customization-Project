@@ -67,3 +67,32 @@ export const deleteCategory = async ({ token, categoryId }) => {
   });
   return data;
 };
+
+export const fetchAdminOrders = async ({ token, range = "all", search = "" } = {}) => {
+  const { data } = await apiClient.get("/admin/orders", {
+    params: {
+      range: range || "all",
+      search: search || undefined
+    },
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  return data;
+};
+
+export const fetchAdminOrderStats = async ({ token } = {}) => {
+  const { data } = await apiClient.get("/admin/orders/stats", {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  return data;
+};
+
+export const updateAdminOrderStatus = async ({ token, orderId, status }) => {
+  const { data } = await apiClient.patch(
+    `/admin/orders/${orderId}/status`,
+    { status },
+    {
+      headers: { Authorization: `Bearer ${token}` }
+    }
+  );
+  return data;
+};

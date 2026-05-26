@@ -1,14 +1,9 @@
 import { pool } from "./pool.js";
-import {
-  DEFAULT_CATEGORY_CONFIGS,
-  DEFAULT_SIDE_OPTIONS,
-  SIZE_OPTIONS,
-  getPrintableAreaPreset,
-  toSideKey,
-  toSlug
-} from "../constants/productMeta.js";
+import { DEFAULT_CATEGORY_CONFIGS, toSlug } from "../constants/productMeta.js";
+import { logger } from "../utils/logger.js";
 
 export const initializeDatabase = async () => {
+  logger.info("Initializing database schema and seed data");
   const client = await pool.connect();
 
   try {
@@ -34,9 +29,8 @@ export const initializeDatabase = async () => {
         description TEXT,
         category VARCHAR(120) NOT NULL DEFAULT 'T-Shirt',
         price NUMERIC(10, 2) NOT NULL CHECK (price >= 0),
-        image_url TEXT NOT NULL,
-        image_urls TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
         gallery_images TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+        search_slugs TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
         available_sizes TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
@@ -58,66 +52,155 @@ export const initializeDatabase = async () => {
       );
     `);
 
-    await client.query(
-      "ALTER TABLE categories ADD COLUMN IF NOT EXISTS supports_sizes BOOLEAN NOT NULL DEFAULT TRUE"
-    );
-    await client.query(
-      "ALTER TABLE categories ADD COLUMN IF NOT EXISTS allowed_sizes TEXT[] NOT NULL DEFAULT ARRAY['XS','S','M','L','XL','XXL']::TEXT[]"
-    );
-    await client.query(
-      "ALTER TABLE categories ADD COLUMN IF NOT EXISTS customization_sides TEXT[] NOT NULL DEFAULT ARRAY['Front','Back']::TEXT[]"
-    );
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        full_name VARCHAR(180) NOT NULL,
+        phone VARCHAR(10) NOT NULL UNIQUE CHECK (phone ~ '^[0-9]{10}$'),
+        email VARCHAR(255),
+        password_hash TEXT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
 
-    await client.query(
-      "ALTER TABLE products ADD COLUMN IF NOT EXISTS category VARCHAR(120) NOT NULL DEFAULT 'T-Shirt'"
-    );
-    await client.query(
-      "ALTER TABLE products ADD COLUMN IF NOT EXISTS description TEXT"
-    );
-    await client.query(
-      "ALTER TABLE products ADD COLUMN IF NOT EXISTS available_sizes TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]"
-    );
-    await client.query(
-      "ALTER TABLE products ADD COLUMN IF NOT EXISTS image_urls TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]"
-    );
-    await client.query(
-      "ALTER TABLE products ADD COLUMN IF NOT EXISTS gallery_images TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]"
-    );
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique_idx
+      ON users (LOWER(email))
+      WHERE email IS NOT NULL;
+    `);
 
-    await client.query(
-      "UPDATE categories SET allowed_sizes = $1::TEXT[] WHERE supports_sizes = TRUE AND (allowed_sizes IS NULL OR array_length(allowed_sizes, 1) IS NULL)",
-      [SIZE_OPTIONS]
-    );
-    await client.query(
-      "UPDATE categories SET allowed_sizes = ARRAY[]::TEXT[] WHERE supports_sizes = FALSE"
-    );
-    await client.query(
-      "UPDATE categories SET customization_sides = $1::TEXT[] WHERE customization_sides IS NULL OR array_length(customization_sides, 1) IS NULL",
-      [DEFAULT_SIDE_OPTIONS]
-    );
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS addresses (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        province VARCHAR(120) NOT NULL,
+        district VARCHAR(120) NOT NULL,
+        municipality_city VARCHAR(140) NOT NULL,
+        ward_number VARCHAR(32) NOT NULL,
+        street_tole VARCHAR(255) NOT NULL,
+        is_default BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
 
-    await client.query(
-      "UPDATE products SET category = 'T-Shirt' WHERE category IS NULL OR TRIM(category) = ''"
-    );
-    await client.query(
-      "UPDATE products SET image_urls = ARRAY[image_url]::TEXT[] WHERE (image_urls IS NULL OR array_length(image_urls, 1) IS NULL) AND image_url IS NOT NULL AND TRIM(image_url) <> ''"
-    );
-    await client.query(
-      "UPDATE products SET gallery_images = image_urls WHERE (gallery_images IS NULL OR array_length(gallery_images, 1) IS NULL) AND image_urls IS NOT NULL AND array_length(image_urls, 1) IS NOT NULL"
-    );
-    await client.query(
-      "UPDATE products SET gallery_images = ARRAY[image_url]::TEXT[] WHERE (gallery_images IS NULL OR array_length(gallery_images, 1) IS NULL) AND image_url IS NOT NULL AND TRIM(image_url) <> ''"
-    );
-    await client.query(
-      "UPDATE products SET image_url = COALESCE(gallery_images[1], image_urls[1], image_url) WHERE image_url IS NULL OR TRIM(image_url) = ''"
-    );
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS addresses_default_unique_idx
+      ON addresses (user_id)
+      WHERE is_default = TRUE;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS cart_items (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        selected_size VARCHAR(40),
+        quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+        selected_sides TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+        customization_state JSONB NOT NULL DEFAULT '{}'::JSONB,
+        preview_image TEXT,
+        product_snapshot JSONB NOT NULL DEFAULT '{}'::JSONB,
+        unit_price NUMERIC(10, 2) NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS cart_items_user_idx
+      ON cart_items (user_id, updated_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS drafts (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        selected_size VARCHAR(40),
+        quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+        selected_sides TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+        active_side VARCHAR(120),
+        canvas_states JSONB NOT NULL DEFAULT '{}'::JSONB,
+        design_exports JSONB NOT NULL DEFAULT '{}'::JSONB,
+        preview_image TEXT,
+        saved_at TIMESTAMPTZ DEFAULT NOW(),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(user_id, product_id)
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS drafts_user_idx
+      ON drafts (user_id, updated_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS orders (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        order_number VARCHAR(40) NOT NULL UNIQUE,
+        name_snapshot VARCHAR(180) NOT NULL,
+        phone_snapshot VARCHAR(32) NOT NULL,
+        email_snapshot VARCHAR(255),
+        address_snapshot JSONB NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        subtotal_amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
+        shipping_amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
+        total_amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS orders_user_idx
+      ON orders (user_id, created_at DESC);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS orders_status_idx
+      ON orders (status, created_at DESC);
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS orders_order_number_unique_idx
+      ON orders (order_number)
+      WHERE order_number IS NOT NULL;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS order_items (
+        id SERIAL PRIMARY KEY,
+        order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+        product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+        product_name VARCHAR(255) NOT NULL,
+        category VARCHAR(120),
+        size VARCHAR(40),
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        unit_price NUMERIC(10, 2) NOT NULL DEFAULT 0,
+        line_total NUMERIC(10, 2) NOT NULL DEFAULT 0,
+        selected_sides TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+        design_urls JSONB NOT NULL DEFAULT '{}'::JSONB,
+        customization_data JSONB NOT NULL DEFAULT '{}'::JSONB,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
 
     for (const config of DEFAULT_CATEGORY_CONFIGS) {
       await client.query(
         `
           INSERT INTO categories (name, slug, supports_sizes, allowed_sizes, customization_sides)
           VALUES ($1, $2, $3, $4::TEXT[], $5::TEXT[])
-          ON CONFLICT (slug) DO NOTHING
+          ON CONFLICT (slug)
+          DO UPDATE SET
+            name = EXCLUDED.name,
+            supports_sizes = EXCLUDED.supports_sizes,
+            allowed_sizes = EXCLUDED.allowed_sizes,
+            customization_sides = EXCLUDED.customization_sides,
+            updated_at = NOW()
         `,
         [
           config.name,
@@ -127,62 +210,13 @@ export const initializeDatabase = async () => {
           config.customizationSides
         ]
       );
-
-      await client.query(
-        `
-          UPDATE categories
-          SET
-            supports_sizes = COALESCE(supports_sizes, $2::BOOLEAN),
-            allowed_sizes = CASE
-              WHEN supports_sizes = FALSE THEN ARRAY[]::TEXT[]
-              WHEN allowed_sizes IS NULL OR array_length(allowed_sizes, 1) IS NULL THEN $3::TEXT[]
-              ELSE allowed_sizes
-            END,
-            customization_sides = CASE
-              WHEN customization_sides IS NULL OR array_length(customization_sides, 1) IS NULL THEN $4::TEXT[]
-              ELSE customization_sides
-            END
-          WHERE LOWER(name) = LOWER($1)
-        `,
-        [
-          config.name,
-          config.supportsSizes,
-          config.supportsSizes ? config.allowedSizes : [],
-          config.customizationSides
-        ]
-      );
-    }
-
-    for (const config of DEFAULT_CATEGORY_CONFIGS) {
-      for (const sideName of config.customizationSides || []) {
-        const sideKey = toSideKey(sideName);
-        const area = getPrintableAreaPreset({ category: config.name, side: sideName });
-
-        await client.query(
-          `
-            UPDATE product_sides ps
-            SET
-              printable_area_x = $1,
-              printable_area_y = $2,
-              printable_area_width = $3,
-              printable_area_height = $4
-            FROM products p
-            WHERE ps.product_id = p.id
-              AND LOWER(p.category) = LOWER($5)
-              AND ps.side_key = $6
-              AND ps.printable_area_x = 72
-              AND ps.printable_area_y = 90
-              AND ps.printable_area_width = 186
-              AND ps.printable_area_height = 236
-          `,
-          [area.x, area.y, area.width, area.height, config.name, sideKey]
-        );
-      }
     }
 
     await client.query("COMMIT");
+    logger.success("Database schema and seed data are ready");
   } catch (error) {
     await client.query("ROLLBACK");
+    logger.error("Database initialization transaction failed", error);
     throw error;
   } finally {
     client.release();

@@ -11,6 +11,9 @@ export const requireAdmin = (req, res, next) => {
 
   try {
     const payload = jwt.verify(token, env.jwtSecret);
+    if (payload?.role !== "admin") {
+      return res.status(401).json({ message: "Invalid token" });
+    }
     req.admin = payload;
     return next();
   } catch (error) {

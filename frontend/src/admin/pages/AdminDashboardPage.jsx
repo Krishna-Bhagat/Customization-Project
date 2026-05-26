@@ -4,8 +4,11 @@ import {
   createProduct,
   deleteCategory,
   deleteProduct,
+  fetchAdminOrders,
+  fetchAdminOrderStats,
   fetchCategories,
   fetchProducts,
+  updateAdminOrderStatus,
   updateProduct,
   updateCategory
 } from "../api/index.js";
@@ -16,6 +19,7 @@ import Loader from "../components/Loader.jsx";
 import PrintableAreaSelector from "../components/PrintableAreaSelector.jsx";
 import SizeChips from "../components/SizeChips.jsx";
 import StatCard from "../components/StatCard.jsx";
+import { useToast } from "../../components/ToastProvider.jsx";
 import { useAdminAuth } from "../context/AdminAuthContext.jsx";
 import { SIDE_SUGGESTIONS, SIZE_SUGGESTIONS } from "../constants/productMeta.js";
 
@@ -39,6 +43,7 @@ const initialForm = {
   description: "",
   price: "",
   category: "",
+  searchSlugs: [],
   galleryImages: [],
   existingGalleryImages: [],
   availableSizes: [],
@@ -53,6 +58,43 @@ const makeSideKey = (value) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+
+const ORDER_RANGE_OPTIONS = [
+  { key: "today", label: "Today" },
+  { key: "week", label: "This Week" },
+  { key: "month", label: "This Month" },
+  { key: "all", label: "All Orders" }
+];
+
+const ORDER_STATUS_STYLES = {
+  pending: "border-amber-200 bg-amber-50 text-amber-700",
+  confirmed: "border-blue-200 bg-blue-50 text-blue-700",
+  dispatched: "border-violet-200 bg-violet-50 text-violet-700",
+  delivered: "border-emerald-200 bg-emerald-50 text-emerald-700"
+};
+
+const formatOrderDate = (value) =>
+  new Date(value).toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+
+const getNextOrderAction = (status) => {
+  const normalized = String(status || "").toLowerCase();
+  if (normalized === "pending") {
+    return { nextStatus: "confirmed", label: "Confirm Order" };
+  }
+  if (normalized === "confirmed") {
+    return { nextStatus: "dispatched", label: "Dispatch Order" };
+  }
+  if (normalized === "dispatched") {
+    return { nextStatus: "delivered", label: "Mark Delivered" };
+  }
+  return null;
+};
 
 const getDefaultPrintableAreaForSide = (sideName) => {
   const sideKey = makeSideKey(sideName);
@@ -103,6 +145,15 @@ const normalizeSizeToken = (value) =>
     .slice(0, 24);
 
 const normalizeSideToken = (value) => formatSideLabel(value).slice(0, 60);
+
+const normalizeSearchSlugToken = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
 
 const uniqueByCaseInsensitive = (items) => {
   const map = new Map();
@@ -163,6 +214,17 @@ const ProductSideChips = ({ sides = [] }) => (
     ))}
   </div>
 );
+
+const OrderStatusBadge = ({ status }) => {
+  const normalized = String(status || "").toLowerCase();
+  const style = ORDER_STATUS_STYLES[normalized] || ORDER_STATUS_STYLES.pending;
+
+  return (
+    <span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase ${style}`}>
+      {normalized || "pending"}
+    </span>
+  );
+};
 
 const TagEditor = ({
   title,
@@ -269,10 +331,22 @@ const SideConfigCard = ({ sideName, config, onFileChange, onAreaChange }) => (
 
 const AdminDashboardPage = () => {
   const { token, logout } = useAdminAuth();
+  const { pushToast } = useToast();
 
   const [activeSection, setActiveSection] = useState("dashboard");
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [orderRange, setOrderRange] = useState("all");
+  const [orderSearchInput, setOrderSearchInput] = useState("");
+  const [orderSearch, setOrderSearch] = useState("");
+  const [orderStats, setOrderStats] = useState({
+    ordersToday: 0,
+    ordersThisWeek: 0,
+    pendingOrders: 0
+  });
+  const [isOrdersLoading, setIsOrdersLoading] = useState(false);
+  const [activeOrderAction, setActiveOrderAction] = useState("");
   const [formState, setFormState] = useState(initialForm);
   const [editingProductId, setEditingProductId] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
@@ -290,11 +364,11 @@ const AdminDashboardPage = () => {
     sizeInput: "",
     sideInput: ""
   });
+  const [searchSlugInput, setSearchSlugInput] = useState("");
 
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
-  const [statusMessage, setStatusMessage] = useState("");
 
   const selectedCategory = useMemo(
     () => getCategoryByName(categories, formState.category),
@@ -307,9 +381,20 @@ const AdminDashboardPage = () => {
     setIsLoading(true);
 
     try {
-      const [productList, categoryList] = await Promise.all([fetchProducts(), fetchCategories()]);
+      const [productList, categoryList, statsResponse, orderResponse] = await Promise.all([
+        fetchProducts(),
+        fetchCategories(),
+        fetchAdminOrderStats({ token }),
+        fetchAdminOrders({ token, range: orderRange, search: orderSearch })
+      ]);
       setProducts(productList);
       setCategories(categoryList);
+      setOrderStats({
+        ordersToday: Number(statsResponse?.ordersToday || 0),
+        ordersThisWeek: Number(statsResponse?.ordersThisWeek || 0),
+        pendingOrders: Number(statsResponse?.pendingOrders || 0)
+      });
+      setOrders(orderResponse?.orders || []);
 
       setCategoryDrafts(
         categoryList.reduce((acc, category) => {
@@ -362,7 +447,9 @@ const AdminDashboardPage = () => {
         };
       });
     } catch (error) {
-      setErrorMessage(error.response?.data?.message || "Failed to load products.");
+      const message = error.response?.data?.message || "Failed to load admin dashboard data.";
+      setErrorMessage(message);
+      pushToast({ type: "error", message });
     } finally {
       setIsLoading(false);
     }
@@ -372,9 +459,73 @@ const AdminDashboardPage = () => {
     loadDashboardData();
   }, []);
 
+  useEffect(() => {
+    if (activeSection !== "orders") {
+      return;
+    }
+    loadOrders({ silent: true });
+    loadOrderStats({ silent: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSection]);
+
+  const loadOrders = async ({ range = orderRange, search = orderSearch, silent = false } = {}) => {
+    if (!silent) {
+      setIsOrdersLoading(true);
+    }
+
+    try {
+      const response = await fetchAdminOrders({
+        token,
+        range,
+        search
+      });
+      setOrders(response?.orders || []);
+    } catch (error) {
+      const message = error.response?.data?.message || "Failed to load orders.";
+      pushToast({ type: "error", message });
+    } finally {
+      if (!silent) {
+        setIsOrdersLoading(false);
+      }
+    }
+  };
+
+  const loadOrderStats = async ({ silent = false } = {}) => {
+    if (!silent) {
+      setIsOrdersLoading(true);
+    }
+
+    try {
+      const stats = await fetchAdminOrderStats({ token });
+      setOrderStats({
+        ordersToday: Number(stats?.ordersToday || 0),
+        ordersThisWeek: Number(stats?.ordersThisWeek || 0),
+        pendingOrders: Number(stats?.pendingOrders || 0)
+      });
+    } catch (error) {
+      const message = error.response?.data?.message || "Failed to load order stats.";
+      pushToast({ type: "error", message });
+    } finally {
+      if (!silent) {
+        setIsOrdersLoading(false);
+      }
+    }
+  };
+
   const clearNotices = () => {
     setErrorMessage("");
-    setStatusMessage("");
+  };
+
+  const notifyError = (message) => {
+    const finalMessage = String(message || "Something went wrong.");
+    setErrorMessage(finalMessage);
+    pushToast({ type: "error", message: finalMessage });
+  };
+
+  const notifySuccess = (message) => {
+    const finalMessage = String(message || "Completed successfully.");
+    setErrorMessage("");
+    pushToast({ type: "success", message: finalMessage });
   };
 
   const handleInputChange = (event) => {
@@ -411,7 +562,7 @@ const AdminDashboardPage = () => {
     const invalidFile = selectedFiles.find((file) => !isAllowedFile(file, GALLERY_ALLOWED_EXTENSIONS));
 
     if (invalidFile) {
-      setErrorMessage(
+      notifyError(
         `Unsupported gallery format (${invalidFile.name}). Allowed: ${formatAllowedExtensions(
           GALLERY_ALLOWED_EXTENSIONS
         )}.`
@@ -423,6 +574,26 @@ const AdminDashboardPage = () => {
     setFormState((prev) => ({
       ...prev,
       galleryImages: selectedFiles
+    }));
+  };
+
+  const addSearchSlug = (rawValue) => {
+    const token = normalizeSearchSlugToken(rawValue);
+    if (!token) {
+      return;
+    }
+
+    setFormState((prev) => ({
+      ...prev,
+      searchSlugs: uniqueByCaseInsensitive([...(prev.searchSlugs || []), token])
+    }));
+    setSearchSlugInput("");
+  };
+
+  const removeSearchSlug = (token) => {
+    setFormState((prev) => ({
+      ...prev,
+      searchSlugs: (prev.searchSlugs || []).filter((item) => item !== token)
     }));
   };
 
@@ -459,7 +630,7 @@ const AdminDashboardPage = () => {
     const defaultArea = getDefaultPrintableAreaForSide(sideName);
 
     if (file && !isAllowedFile(file, MOCKUP_ALLOWED_EXTENSIONS)) {
-      setErrorMessage(
+      notifyError(
         `Unsupported mockup format (${file.name}). Allowed: ${formatAllowedExtensions(
           MOCKUP_ALLOWED_EXTENSIONS
         )}.`
@@ -544,12 +715,14 @@ const AdminDashboardPage = () => {
       description: product.description || "",
       price: String(product.price ?? ""),
       category: product.category || category?.name || "",
+      searchSlugs: Array.isArray(product.searchSlugs) ? product.searchSlugs : [],
       galleryImages: [],
       existingGalleryImages: getProductImages(product),
       availableSizes: Array.isArray(product.availableSizes) ? product.availableSizes : [],
       enabledSides,
       sideConfigByKey
     });
+    setSearchSlugInput("");
     setActiveSection("products");
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -557,6 +730,7 @@ const AdminDashboardPage = () => {
   const handleCancelEdit = () => {
     clearNotices();
     setEditingProductId(null);
+    setSearchSlugInput("");
     setFormState((prev) => {
       const category = getCategoryByName(categories, prev.category);
       const defaultSides = category?.customizationSides || ["Front", "Back"];
@@ -574,12 +748,12 @@ const AdminDashboardPage = () => {
     clearNotices();
 
     if (!formState.name || !formState.price || !formState.category) {
-      setErrorMessage("Name, category and price are required.");
+      notifyError("Name, category and price are required.");
       return;
     }
 
     if (formState.enabledSides.length === 0) {
-      setErrorMessage("Select at least one customization side.");
+      notifyError("Select at least one customization side.");
       return;
     }
 
@@ -587,12 +761,12 @@ const AdminDashboardPage = () => {
       formState.galleryImages.length === 0 &&
       (!isEditMode || formState.existingGalleryImages.length === 0)
     ) {
-      setErrorMessage("Upload at least one customer gallery image.");
+      notifyError("Upload at least one customer gallery image.");
       return;
     }
 
     if (selectedCategory?.supportsSizes && formState.availableSizes.length === 0) {
-      setErrorMessage("Select at least one size for this product.");
+      notifyError("Select at least one size for this product.");
       return;
     }
 
@@ -600,7 +774,7 @@ const AdminDashboardPage = () => {
       const sideKey = makeSideKey(sideName);
       const sideConfig = formState.sideConfigByKey[sideKey];
       if (!sideConfig?.mockupFile && !sideConfig?.mockupImageUrl) {
-        setErrorMessage(`Upload mockup image for ${sideName}.`);
+        notifyError(`Upload mockup image for ${sideName}.`);
         return;
       }
     }
@@ -612,6 +786,7 @@ const AdminDashboardPage = () => {
     payload.append("category", formState.category);
     payload.append("availableSizes", JSON.stringify(formState.availableSizes));
     payload.append("enabledSides", JSON.stringify(formState.enabledSides));
+    payload.append("searchSlugs", JSON.stringify(formState.searchSlugs || []));
 
     const sideConfigPayload = {};
 
@@ -646,10 +821,10 @@ const AdminDashboardPage = () => {
     try {
       if (isEditMode) {
         await updateProduct({ token, productId: editingProductId, formData: payload });
-        setStatusMessage("Product updated successfully.");
+        notifySuccess("Product updated successfully.");
       } else {
         await createProduct({ token, formData: payload });
-        setStatusMessage("Product added successfully.");
+        notifySuccess("Product added successfully.");
       }
 
       setEditingProductId(null);
@@ -665,10 +840,11 @@ const AdminDashboardPage = () => {
           availableSizes: []
         };
       });
+      setSearchSlugInput("");
 
       await loadDashboardData();
     } catch (error) {
-      setErrorMessage(error.response?.data?.message || "Failed to add product.");
+      notifyError(error.response?.data?.message || "Failed to add product.");
     } finally {
       setIsSaving(false);
     }
@@ -679,10 +855,10 @@ const AdminDashboardPage = () => {
 
     try {
       await deleteProduct({ token, productId });
-      setStatusMessage("Product deleted.");
+      notifySuccess("Product deleted.");
       await loadDashboardData();
     } catch (error) {
-      setErrorMessage(error.response?.data?.message || "Failed to delete product.");
+      notifyError(error.response?.data?.message || "Failed to delete product.");
     }
   };
 
@@ -754,17 +930,17 @@ const AdminDashboardPage = () => {
     clearNotices();
 
     if (!draft.name.trim()) {
-      setErrorMessage("Category name is required.");
+      notifyError("Category name is required.");
       return;
     }
 
     if (draft.supportsSizes && draft.allowedSizes.length === 0) {
-      setErrorMessage("Select at least one allowed size for this category.");
+      notifyError("Select at least one allowed size for this category.");
       return;
     }
 
     if (draft.customizationSides.length === 0) {
-      setErrorMessage("Select at least one customization side for this category.");
+      notifyError("Select at least one customization side for this category.");
       return;
     }
 
@@ -780,10 +956,10 @@ const AdminDashboardPage = () => {
         }
       });
 
-      setStatusMessage("Category updated.");
+      notifySuccess("Category updated.");
       await loadDashboardData();
     } catch (error) {
-      setErrorMessage(error.response?.data?.message || "Failed to update category.");
+      notifyError(error.response?.data?.message || "Failed to update category.");
     }
   };
 
@@ -792,10 +968,10 @@ const AdminDashboardPage = () => {
 
     try {
       await deleteCategory({ token, categoryId });
-      setStatusMessage("Category deleted.");
+      notifySuccess("Category deleted.");
       await loadDashboardData();
     } catch (error) {
-      setErrorMessage(error.response?.data?.message || "Failed to delete category.");
+      notifyError(error.response?.data?.message || "Failed to delete category.");
     }
   };
 
@@ -846,17 +1022,17 @@ const AdminDashboardPage = () => {
     clearNotices();
 
     if (!newCategory.name.trim()) {
-      setErrorMessage("Category name is required.");
+      notifyError("Category name is required.");
       return;
     }
 
     if (newCategory.supportsSizes && newCategory.allowedSizes.length === 0) {
-      setErrorMessage("Select at least one size for category.");
+      notifyError("Select at least one size for category.");
       return;
     }
 
     if (newCategory.customizationSides.length === 0) {
-      setErrorMessage("Select at least one customization side for category.");
+      notifyError("Select at least one customization side for category.");
       return;
     }
 
@@ -871,7 +1047,7 @@ const AdminDashboardPage = () => {
         }
       });
 
-      setStatusMessage("Category created.");
+      notifySuccess("Category created.");
       setNewCategory({
         name: "",
         supportsSizes: true,
@@ -881,7 +1057,40 @@ const AdminDashboardPage = () => {
       setNewCategoryInputs({ sizeInput: "", sideInput: "" });
       await loadDashboardData();
     } catch (error) {
-      setErrorMessage(error.response?.data?.message || "Failed to create category.");
+      notifyError(error.response?.data?.message || "Failed to create category.");
+    }
+  };
+
+  const handleApplyOrderSearch = async (event) => {
+    event.preventDefault();
+    const normalizedSearch = orderSearchInput.trim();
+    setOrderSearch(normalizedSearch);
+    await loadOrders({ range: orderRange, search: normalizedSearch });
+  };
+
+  const handleSelectOrderRange = async (range) => {
+    const normalizedRange = String(range || "all");
+    setOrderRange(normalizedRange);
+    await loadOrders({ range: normalizedRange, search: orderSearch });
+  };
+
+  const handleOrderStatusUpdate = async ({ orderId, status }) => {
+    setActiveOrderAction(`${orderId}-${status}`);
+    try {
+      const response = await updateAdminOrderStatus({
+        token,
+        orderId,
+        status
+      });
+      notifySuccess(response?.message || "Order status updated.");
+      await Promise.all([
+        loadOrders({ range: orderRange, search: orderSearch, silent: true }),
+        loadOrderStats({ silent: true })
+      ]);
+    } catch (error) {
+      notifyError(error.response?.data?.message || "Failed to update order status.");
+    } finally {
+      setActiveOrderAction("");
     }
   };
 
@@ -898,19 +1107,18 @@ const AdminDashboardPage = () => {
   const dashboardStats = useMemo(() => {
     const totalProducts = products.length;
     const totalCategories = categories.length;
-    const totalConfiguredSides = products.reduce(
-      (sum, product) => sum + (Array.isArray(product.sides) ? product.sides.length : 0),
-      0
-    );
-    const productsWithGallery = products.filter((product) => getProductImages(product).length > 1).length;
+    const ordersToday = Number(orderStats.ordersToday || 0);
+    const ordersThisWeek = Number(orderStats.ordersThisWeek || 0);
+    const pendingOrders = Number(orderStats.pendingOrders || 0);
 
     return {
       totalProducts,
       totalCategories,
-      totalConfiguredSides,
-      productsWithGallery
+      ordersToday,
+      ordersThisWeek,
+      pendingOrders
     };
-  }, [products, categories]);
+  }, [categories, orderStats, products]);
 
   return (
     <div className="min-h-screen bg-slate-100">
@@ -929,10 +1137,10 @@ const AdminDashboardPage = () => {
             {!isLoading && activeSection === "dashboard" ? (
               <section className="space-y-6">
                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                  <StatCard title="Total Products" value={dashboardStats.totalProducts} hint="Active catalog items" />
-                  <StatCard title="Categories" value={dashboardStats.totalCategories} hint="Configurable groups" tone="blue" />
-                  <StatCard title="Configured Sides" value={dashboardStats.totalConfiguredSides} hint="Total side mockups" tone="purple" />
-                  <StatCard title="Rich Galleries" value={dashboardStats.productsWithGallery} hint="Products with multi-image galleries" tone="amber" />
+                  <StatCard title="Orders Today" value={dashboardStats.ordersToday} hint="Orders placed today" />
+                  <StatCard title="Orders This Week" value={dashboardStats.ordersThisWeek} hint="Weekly order volume" tone="blue" />
+                  <StatCard title="Pending Orders" value={dashboardStats.pendingOrders} hint="Need action from admin" tone="amber" />
+                  <StatCard title="Total Products" value={dashboardStats.totalProducts} hint={`${dashboardStats.totalCategories} categories`} tone="purple" />
                 </div>
 
                 <section className="card p-6">
@@ -950,7 +1158,19 @@ const AdminDashboardPage = () => {
                           {product.description ? (
                             <p className="mt-1 line-clamp-2 text-xs text-slate-500">{product.description}</p>
                           ) : null}
-                          <p className="mt-1 text-sm font-semibold text-slate-700">${Number(product.price).toFixed(2)}</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-700">NPR {Number(product.price).toFixed(2)}</p>
+                          {(product.searchSlugs || []).length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                              {(product.searchSlugs || []).slice(0, 4).map((slug) => (
+                                <span
+                                  key={slug}
+                                  className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-600"
+                                >
+                                  {slug}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
                           <SizeChips sizes={product.availableSizes} />
                           <ProductSideChips sides={product.sides || []} />
                         </article>
@@ -1008,10 +1228,24 @@ const AdminDashboardPage = () => {
                         </select>
                       </label>
                       <label className="block text-sm">
-                        <span className="mb-1 block font-medium text-slate-700">Price</span>
+                        <span className="mb-1 block font-medium text-slate-700">Price (NPR)</span>
                         <input name="price" type="number" min="0" step="0.01" value={formState.price} onChange={handleInputChange} className="w-full rounded-xl border border-slate-300 px-3 py-2 outline-none ring-teal-300 focus:ring" />
                       </label>
                     </div>
+
+                    <TagEditor
+                      title="Search Slugs (for product search)"
+                      items={formState.searchSlugs || []}
+                      inputValue={searchSlugInput}
+                      onInputChange={setSearchSlugInput}
+                      onAdd={addSearchSlug}
+                      onRemove={removeSearchSlug}
+                      placeholder="Example: krishna-tee"
+                      suggestions={[
+                        normalizeSearchSlugToken(formState.name),
+                        normalizeSearchSlugToken(formState.category)
+                      ].filter(Boolean)}
+                    />
 
                     {selectedCategory?.supportsSizes ? (
                       <section className="block text-sm">
@@ -1152,7 +1386,19 @@ const AdminDashboardPage = () => {
                             {product.description ? (
                               <p className="line-clamp-2 text-xs text-slate-500">{product.description}</p>
                             ) : null}
-                            <p className="text-sm font-semibold text-slate-700">${Number(product.price).toFixed(2)}</p>
+                            <p className="text-sm font-semibold text-slate-700">NPR {Number(product.price).toFixed(2)}</p>
+                            {(product.searchSlugs || []).length > 0 ? (
+                              <div className="flex flex-wrap gap-1.5">
+                                {(product.searchSlugs || []).slice(0, 4).map((slug) => (
+                                  <span
+                                    key={slug}
+                                    className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-600"
+                                  >
+                                    {slug}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
                             <SizeChips sizes={product.availableSizes} />
                             <ProductSideChips sides={product.sides || []} />
                           </div>
@@ -1173,6 +1419,122 @@ const AdminDashboardPage = () => {
                     })}
                     {filteredProducts.length === 0 ? <p className="text-sm text-slate-500">No products match your filters.</p> : null}
                   </div>
+                </section>
+              </section>
+            ) : null}
+
+            {!isLoading && activeSection === "orders" ? (
+              <section className="space-y-6">
+                <section className="card p-6">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <h3 className="font-heading text-xl font-semibold text-slate-900">Order Management</h3>
+                      <p className="mt-1 text-sm text-slate-500">
+                        Search by order id, customer name, or phone and update statuses in sequence.
+                      </p>
+                    </div>
+
+                    <form onSubmit={handleApplyOrderSearch} className="flex w-full gap-2 md:max-w-md">
+                      <input
+                        value={orderSearchInput}
+                        onChange={(event) => setOrderSearchInput(event.target.value)}
+                        placeholder="Search order id / customer / phone"
+                        className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none ring-teal-300 focus:ring"
+                      />
+                      <button
+                        type="submit"
+                        className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                      >
+                        Search
+                      </button>
+                    </form>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {ORDER_RANGE_OPTIONS.map((option) => (
+                      <button
+                        key={option.key}
+                        type="button"
+                        onClick={() => handleSelectOrderRange(option.key)}
+                        className={`rounded-xl px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] transition ${
+                          orderRange === option.key
+                            ? "bg-teal-600 text-white"
+                            : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="card p-6">
+                  {isOrdersLoading ? (
+                    <Loader label="Loading orders..." />
+                  ) : orders.length === 0 ? (
+                    <p className="text-sm text-slate-500">No orders found for this filter.</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {orders.map((order) => {
+                        const orderAction = getNextOrderAction(order.status);
+                        const actionKey = `${order.id}-${orderAction?.nextStatus || ""}`;
+                        return (
+                          <article
+                            key={order.id}
+                            className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+                          >
+                            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                              <div className="space-y-1">
+                                <p className="text-xs uppercase tracking-[0.12em] text-slate-500">Order Number</p>
+                                <h4 className="font-heading text-lg font-semibold text-slate-900">
+                                  {order.orderNumber}
+                                </h4>
+                                <p className="text-sm text-slate-600">
+                                  {order.customerName} | {order.customerPhone}
+                                </p>
+                                <p className="text-sm text-slate-500">
+                                  {order.productSummary || "Product details unavailable"}
+                                </p>
+                              </div>
+
+                              <div className="flex flex-col items-start gap-2 md:items-end">
+                                <OrderStatusBadge status={order.status} />
+                                <p className="text-sm font-semibold text-slate-800">
+                                  NPR {Number(order.totalAmount || 0).toFixed(2)}
+                                </p>
+                                <p className="text-xs text-slate-500">{formatOrderDate(order.createdAt)}</p>
+                                <p className="text-xs text-slate-500">
+                                  Qty: {Number(order.totalQuantity || 0)}
+                                </p>
+                              </div>
+                            </div>
+
+                            {orderAction ? (
+                              <div className="mt-3 flex justify-end">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleOrderStatusUpdate({
+                                      orderId: order.id,
+                                      status: orderAction.nextStatus
+                                    })
+                                  }
+                                  disabled={activeOrderAction === actionKey}
+                                  className="rounded-xl bg-teal-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-teal-300"
+                                >
+                                  {activeOrderAction === actionKey ? "Updating..." : orderAction.label}
+                                </button>
+                              </div>
+                            ) : (
+                              <p className="mt-3 text-right text-xs font-semibold text-emerald-700">
+                                Order lifecycle complete
+                              </p>
+                            )}
+                          </article>
+                        );
+                      })}
+                    </div>
+                  )}
                 </section>
               </section>
             ) : null}
@@ -1314,11 +1676,6 @@ const AdminDashboardPage = () => {
               </section>
             ) : null}
 
-            {statusMessage ? (
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">
-                {statusMessage}
-              </div>
-            ) : null}
             {errorMessage ? (
               <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
                 {errorMessage}

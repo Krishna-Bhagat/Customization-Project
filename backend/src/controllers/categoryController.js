@@ -271,13 +271,15 @@ export const updateCategory = async (req, res, next) => {
             p.id,
             $2,
             $3,
-            COALESCE(p.gallery_images[1], p.image_urls[1], p.image_url),
+            p.gallery_images[1],
             $4,
             $5,
             $6,
             $7
           FROM products p
           WHERE LOWER(p.category) = LOWER($1)
+            AND p.gallery_images IS NOT NULL
+            AND array_length(p.gallery_images, 1) IS NOT NULL
           ON CONFLICT (product_id, side_key) DO NOTHING
         `,
         [

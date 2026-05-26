@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { fetchCategories, fetchProducts } from "../api/index.js";
 import EmptyState from "../components/EmptyState.jsx";
@@ -11,25 +11,33 @@ const ProductsPage = () => {
   const [categories, setCategories] = useState([]);
   const [selectedSizesByProduct, setSelectedSizesByProduct] = useState({});
   const [searchTerm, setSearchTerm] = useState("");
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState("");
   const [activeCategory, setActiveCategory] = useState("All");
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
 
   useEffect(() => {
-    const loadCatalog = async () => {
+    const loadCategories = async () => {
       try {
-        const [productResponse, categoryResponse] = await Promise.all([fetchProducts(), fetchCategories()]);
-        setProducts(productResponse);
+        const categoryResponse = await fetchCategories();
         setCategories(categoryResponse);
       } catch (error) {
-        setErrorMessage(error.response?.data?.message || "Failed to load products.");
-      } finally {
-        setIsLoading(false);
+        setErrorMessage(error.response?.data?.message || "Failed to load categories.");
       }
     };
 
-    loadCatalog();
+    loadCategories();
   }, []);
+
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      setDebouncedSearchTerm(searchTerm.trim());
+    }, 350);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [searchTerm]);
 
   useEffect(() => {
     if (!categories.length) {
@@ -50,22 +58,46 @@ const ProductsPage = () => {
     }
   }, [categories, searchParams]);
 
+  useEffect(() => {
+    let isSubscribed = true;
+
+    const loadProducts = async () => {
+      setIsLoading(true);
+      setErrorMessage("");
+
+      try {
+        const productResponse = await fetchProducts({
+          search: debouncedSearchTerm,
+          category: activeCategory === "All" ? "" : activeCategory
+        });
+
+        if (isSubscribed) {
+          setProducts(Array.isArray(productResponse) ? productResponse : []);
+        }
+      } catch (error) {
+        if (isSubscribed) {
+          setErrorMessage(error.response?.data?.message || "Failed to load products.");
+        }
+      } finally {
+        if (isSubscribed) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    loadProducts();
+
+    return () => {
+      isSubscribed = false;
+    };
+  }, [debouncedSearchTerm, activeCategory]);
+
   const handleSelectSize = (productId, size) => {
     setSelectedSizesByProduct((prev) => ({
       ...prev,
       [productId]: size
     }));
   };
-
-  const filteredProducts = useMemo(
-    () =>
-      products.filter((product) => {
-        const categoryMatch = activeCategory === "All" || product.category === activeCategory;
-        const searchMatch = product.name.toLowerCase().includes(searchTerm.trim().toLowerCase());
-        return categoryMatch && searchMatch;
-      }),
-    [products, activeCategory, searchTerm]
-  );
 
   return (
     <section className="space-y-6">
@@ -104,15 +136,15 @@ const ProductsPage = () => {
         {errorMessage ? (
           <EmptyState title="Unable to load products" description="Please try again after a short while." />
         ) : null}
-        {!isLoading && !errorMessage && filteredProducts.length === 0 ? (
+        {!isLoading && !errorMessage && products.length === 0 ? (
           <EmptyState
             title="No matching products"
             description="Try a different keyword or category filter to find the perfect gift."
           />
         ) : null}
-        {!isLoading && !errorMessage && filteredProducts.length > 0 ? (
+        {!isLoading && !errorMessage && products.length > 0 ? (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {filteredProducts.map((product) => (
+            {products.map((product) => (
               <ProductCard
                 key={product.id}
                 product={product}

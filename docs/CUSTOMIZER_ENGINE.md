@@ -35,14 +35,15 @@
 
 - Side canvas history stack supports undo/redo.
 - Snapshot strategy uses `canvas.toDatalessJSON()`.
-- Persisted in session storage through workspace page integration.
+- Persisted in local storage with expiry through workspace page integration.
+- For logged-in users, drafts can also be upserted to backend (`drafts` table).
 
 ## Export Behavior
 
 - Transparent design export per side:
   - crop to printable area
   - PNG output
-- Checkout page composes downloadable mockup previews using:
+- Checkout/post-order flow composes downloadable mockup previews using:
   - side mockup image
   - exported design overlay
 
@@ -53,4 +54,3 @@
 - Printable presets: `constants/customizer.js`
 - Draft persistence and lifecycle: `utils/customizationSession.js`
 - Download composition: `utils/designDownload.js`
-

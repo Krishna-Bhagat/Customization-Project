@@ -68,19 +68,11 @@ const CATEGORY_PRINTABLE_PRESETS = {
     front: { x: 94, y: 136, width: 142, height: 128 },
     back: { x: 94, y: 136, width: 142, height: 128 }
   },
-  cups: {
-    front: { x: 94, y: 136, width: 142, height: 128 },
-    back: { x: 94, y: 136, width: 142, height: 128 }
-  },
   mug: {
     front: { x: 94, y: 136, width: 142, height: 128 },
     back: { x: 94, y: 136, width: 142, height: 128 }
   },
   keyring: {
-    front: { x: 102, y: 128, width: 126, height: 148 },
-    back: { x: 102, y: 128, width: 126, height: 148 }
-  },
-  "key-ring": {
     front: { x: 102, y: 128, width: 126, height: 148 },
     back: { x: 102, y: 128, width: 126, height: 148 }
   }

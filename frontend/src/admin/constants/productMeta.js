@@ -25,5 +25,6 @@ export const SIDE_SUGGESTIONS = [
 export const SIDEBAR_SECTIONS = [
   { key: "dashboard", label: "Dashboard" },
   { key: "products", label: "Products" },
+  { key: "orders", label: "Orders" },
   { key: "settings", label: "Settings" }
 ];

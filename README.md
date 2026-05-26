@@ -9,8 +9,7 @@ Production-ready full-stack platform for personalized clothing/accessories with:
 
 ## Tech Stack
 
-- Frontend (customer): React + Tailwind + Fabric.js + Framer Motion
-- Frontend (admin): React + Tailwind
+- Frontend (single app): React + Tailwind + Fabric.js + Framer Motion
 - Backend: Node.js + Express
 - Database: PostgreSQL (Supabase-compatible)
 - Asset storage: Cloudinary
@@ -32,20 +31,18 @@ Customization Project/
       utils/
   frontend/
     src/
+      admin/
+        api/
+        components/
+        constants/
+        context/
+        pages/
       api/
       components/
       constants/
       pages/
       styles/
       utils/
-  admin-frontend/
-    src/
-      api/
-      components/
-      constants/
-      context/
-      pages/
-      styles/
   docs/
     ARCHITECTURE.md
     FRONTEND.md
@@ -60,26 +57,44 @@ Customization Project/
 
 - Premium storefront with category sections, product detail, and product flow pages
 - Entire product/category cards clickable for mobile-first UX
+- User account system (phone + password, optional email)
+- Forgot password flow (phone/email based reset without OTP)
+- Profile page with editable default address/email/password
+- Persistent cart:
+  - guest cart in local storage (30 days)
+  - user cart in PostgreSQL
+  - automatic guest-to-user cart merge on login
+- Persistent draft system:
+  - guest drafts in local storage (30 days)
+  - user drafts in PostgreSQL
+  - draft import prompt after login
 - Multi-step customization flow:
   - Product detail
-  - Print location selection
+  - Print side selection
   - Customizer workspace
-  - Review and checkout
+  - Cart + Checkout
 - Fabric.js customizer:
   - Text/image add, drag, rotate, scale
   - Side-specific canvas state
   - Printable area clipping + movement constraints
   - Snap-to-center guides
-  - Draft save in session storage
+  - Draft save (local + server for logged-in users)
 - Design download:
   - Side-wise downloadable PNG previews with mockup + design overlay
-- Order flow:
-  - Upload design images to Cloudinary
-  - Send order email with customer details and design URLs
-  - Post-order prompt to download design before finishing
-  - Draft cleanup on finish
+- Ecommerce order flow:
+  - login-gated checkout
+  - address snapshot from user profile
+  - design uploads to Cloudinary
+  - order + order_items persistence in PostgreSQL
+  - admin email notification
+  - optional customer confirmation email
+  - post-order download prompt before final cleanup
+- Order tracking:
+  - customer "My Orders" page with status tracker
+  - admin order management with range filters, search, and status actions
 - Admin dashboard:
   - Product create/edit/delete
+  - Optional product search slug tags (for cross-category keyword search)
   - Category create/edit/delete
   - Configurable sides and sizes per category
   - Separate customer gallery images vs customization mockup images
@@ -92,7 +107,6 @@ Customization Project/
 ```bash
 cp backend/.env.example backend/.env
 cp frontend/.env.example frontend/.env
-cp admin-frontend/.env.example admin-frontend/.env
 ```
 
 2. Start backend:
@@ -103,7 +117,7 @@ npm install
 npm run dev
 ```
 
-3. Start customer frontend:
+3. Start frontend:
 
 ```bash
 cd frontend
@@ -111,19 +125,11 @@ npm install
 npm run dev
 ```
 
-4. Start admin frontend:
-
-```bash
-cd admin-frontend
-npm install
-npm run dev
-```
-
 Default local URLs:
 
 - Backend: `http://localhost:5000`
-- Customer frontend: `http://localhost:5173`
-- Admin frontend: `http://localhost:5174` (next available Vite port)
+- Frontend app: `http://localhost:5173`
+- Admin dashboard route: `http://localhost:5173/admin` (manual URL entry)
 
 ## Documentation Index
 
@@ -137,14 +143,45 @@ Default local URLs:
 
 ## Deployment Targets
 
-- Frontend/customer: Vercel
-- Frontend/admin: Vercel (separate project/domain)
+- Frontend (customer + admin): Vercel
 - Backend: Render
 - PostgreSQL: Supabase
+
+## Post-Deployment Checklist
+
+- Verify customer pages load from root URL.
+- Verify admin login loads at `https://your-domain.com/admin`.
+- Ask admin team to bookmark `https://your-domain.com/admin` for direct access.
+
+## SPA Routing (Important)
+
+Frontend is a React SPA and requires route rewrites in production to prevent refresh/login route breaks.
+
+- Rewrite config:
+  - `frontend/vercel.json`
+
+Each file rewrites all paths to `index.html`:
+
+```json
+{
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
+```
+
+Without this, direct visits or refresh on routes like `/product/:id`, `/customize/:id/workspace`, or `/admin/login` can fail.
 
 ## Production Notes
 
 - No AI image generation is included.
-- No end-user authentication is included.
 - Category/product schema bootstrapping runs automatically on backend startup.
-- Configure backend `FRONTEND_URL` with both customer and admin origins (comma-separated).
+- Product pricing UI is shown in `NPR`.
+- Configure backend `FRONTEND_URL` with your frontend origin.
+
+## Troubleshooting
+
+- React app appears to "reload" or flicker in dev:
+  - `React.StrictMode` was intentionally removed from:
+    - `frontend/src/main.jsx`
+  - This avoids double-mount behavior in React dev mode that can look like reloads.

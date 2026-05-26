@@ -210,17 +210,7 @@ const ProductDetailPage = () => {
       pushToast({ type: "error", message: "Please select a size before checkout." });
       return;
     }
-
-    const normalizedSelectedSides = normalizeSelectedSides(selectedSides, sideOptions);
-
-    writeCustomizationSession(id, {
-      selectedSize,
-      quantity,
-      selectedSides: normalizedSelectedSides,
-      activeSide: normalizedSelectedSides[0] || "front"
-    });
-
-    navigate(`/customize/${id}/checkout`);
+    handleDesignOnline();
   };
 
   const increaseQuantity = () => setQuantity((prev) => Math.min(prev + 1, 20));
@@ -272,7 +262,7 @@ const ProductDetailPage = () => {
               </h1>
               <p className="mt-1 text-sm font-semibold text-brand-700">{subtitle}</p>
               <p className="mt-3 text-sm leading-relaxed text-slate-600">{getProductDescription(product)}</p>
-              <p className="mt-4 text-2xl font-semibold text-slate-900">${Number(product.price).toFixed(2)}</p>
+              <p className="mt-4 text-2xl font-semibold text-slate-900">NPR {Number(product.price).toFixed(2)}</p>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-1">

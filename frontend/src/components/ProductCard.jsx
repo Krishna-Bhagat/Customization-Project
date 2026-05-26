@@ -63,7 +63,7 @@ const ProductCard = ({ product, selectedSize, onSelectSize, showSizeSelector = t
           {product.description ? (
             <p className="mt-1 text-xs text-slate-500">{product.description}</p>
           ) : null}
-          <p className="mt-1 text-sm font-semibold text-slate-700">${Number(product.price).toFixed(2)}</p>
+          <p className="mt-1 text-sm font-semibold text-slate-700">NPR {Number(product.price).toFixed(2)}</p>
         </div>
 
         {requiresSizeSelection ? (
