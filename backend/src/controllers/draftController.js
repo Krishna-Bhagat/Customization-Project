@@ -24,6 +24,25 @@ const normalizeJsonObject = (value) => {
   return value;
 };
 
+const normalizeSidePreviewRefs = (value) => {
+  const refs = normalizeJsonObject(value);
+
+  return Object.entries(refs).reduce((acc, [side, ref]) => {
+    const sideKey = toSideKey(side);
+    const previewRef = String(ref || "").trim();
+    if (!sideKey || !previewRef) {
+      return acc;
+    }
+    acc[sideKey] = previewRef;
+    return acc;
+  }, {});
+};
+
+const normalizeDraftMode = (value) => {
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized === "manual" ? "manual" : "auto";
+};
+
 const mapDraftRow = (row) => ({
   id: Number(row.id),
   productId: Number(row.product_id),
@@ -33,7 +52,10 @@ const mapDraftRow = (row) => ({
   activeSide: row.active_side || "",
   canvasStates: normalizeJsonObject(row.canvas_states),
   designExports: normalizeJsonObject(row.design_exports),
+  sidePreviewRefs: normalizeSidePreviewRefs(row.side_preview_refs),
   previewImage: row.preview_image || "",
+  draftMode: normalizeDraftMode(row.draft_mode),
+  isManualSave: normalizeDraftMode(row.draft_mode) === "manual",
   savedAt: row.saved_at ? new Date(row.saved_at).getTime() : Date.now(),
   createdAt: row.created_at,
   updatedAt: row.updated_at
@@ -98,7 +120,11 @@ export const upsertUserDraft = async (req, res, next) => {
     const activeSide = toSideKey(req.body.activeSide || selectedSides[0] || "");
     const canvasStates = normalizeJsonObject(req.body.canvasStates);
     const designExports = normalizeJsonObject(req.body.designExports);
+    const sidePreviewRefs = normalizeSidePreviewRefs(req.body.sidePreviewRefs);
     const previewImage = String(req.body.previewImage || "").trim();
+    const draftMode = normalizeDraftMode(
+      req.body.draftMode || (req.body.isManualSave ? "manual" : "auto")
+    );
     const savedAt = Number(req.body.savedAt) > 0 ? new Date(Number(req.body.savedAt)) : new Date();
 
     const result = await pool.query(
@@ -112,10 +138,12 @@ export const upsertUserDraft = async (req, res, next) => {
           active_side,
           canvas_states,
           design_exports,
+          side_preview_refs,
           preview_image,
+          draft_mode,
           saved_at
         )
-        VALUES ($1, $2, $3, $4, $5::TEXT[], $6, $7::JSONB, $8::JSONB, $9, $10)
+        VALUES ($1, $2, $3, $4, $5::TEXT[], $6, $7::JSONB, $8::JSONB, $9::JSONB, $10, $11, $12)
         ON CONFLICT (user_id, product_id)
         DO UPDATE SET
           selected_size = EXCLUDED.selected_size,
@@ -124,7 +152,9 @@ export const upsertUserDraft = async (req, res, next) => {
           active_side = EXCLUDED.active_side,
           canvas_states = EXCLUDED.canvas_states,
           design_exports = EXCLUDED.design_exports,
+          side_preview_refs = EXCLUDED.side_preview_refs,
           preview_image = EXCLUDED.preview_image,
+          draft_mode = EXCLUDED.draft_mode,
           saved_at = EXCLUDED.saved_at,
           updated_at = NOW()
         RETURNING *
@@ -138,7 +168,9 @@ export const upsertUserDraft = async (req, res, next) => {
         activeSide || null,
         JSON.stringify(canvasStates),
         JSON.stringify(designExports),
+        JSON.stringify(sidePreviewRefs),
         previewImage || null,
+        draftMode,
         savedAt
       ]
     );
@@ -159,7 +191,31 @@ export const deleteUserDraftByProduct = async (req, res, next) => {
       return res.status(400).json({ message: "Invalid product id." });
     }
 
-    await pool.query("DELETE FROM drafts WHERE user_id = $1 AND product_id = $2", [req.user.id, productId]);
+    const autoOnly = ["1", "true", "yes"].includes(String(req.query.autoOnly || "").trim().toLowerCase());
+
+    if (autoOnly) {
+      const deleteResult = await pool.query(
+        "DELETE FROM drafts WHERE user_id = $1 AND product_id = $2 AND draft_mode = 'auto' RETURNING id",
+        [req.user.id, productId]
+      );
+      const manualResult = await pool.query(
+        "SELECT id FROM drafts WHERE user_id = $1 AND product_id = $2 AND draft_mode = 'manual' LIMIT 1",
+        [req.user.id, productId]
+      );
+      return res.status(200).json({
+        message:
+          deleteResult.rows.length > 0
+            ? "Auto draft removed successfully."
+            : "No auto draft found to remove.",
+        deleted: deleteResult.rows.length > 0,
+        preservedManual: Boolean(manualResult.rows[0])
+      });
+    }
+
+    await pool.query("DELETE FROM drafts WHERE user_id = $1 AND product_id = $2", [
+      req.user.id,
+      productId
+    ]);
     return res.status(200).json({
       message: "Draft removed successfully."
     });

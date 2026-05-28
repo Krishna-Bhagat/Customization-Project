@@ -41,7 +41,9 @@ export const composeMockupPreview = async ({
   printableArea,
   canvasWidth = 330,
   canvasHeight = 430,
-  multiplier = 3
+  multiplier = 3,
+  format = "png",
+  quality = 0.82
 }) => {
   const targetCanvas = document.createElement("canvas");
   targetCanvas.width = Math.max(1, Math.round(canvasWidth * multiplier));
@@ -73,7 +75,19 @@ export const composeMockupPreview = async ({
     );
   }
 
-  return targetCanvas.toDataURL("image/png");
+  const normalizedFormat = String(format || "png").toLowerCase();
+  const mimeType =
+    normalizedFormat === "webp"
+      ? "image/webp"
+      : normalizedFormat === "jpeg" || normalizedFormat === "jpg"
+        ? "image/jpeg"
+        : "image/png";
+
+  if (mimeType === "image/png") {
+    return targetCanvas.toDataURL(mimeType);
+  }
+
+  return targetCanvas.toDataURL(mimeType, Math.min(Math.max(Number(quality) || 0.82, 0.4), 1));
 };
 
 export const buildDesignFileName = ({ productName, sideLabel }) => {
@@ -81,4 +95,3 @@ export const buildDesignFileName = ({ productName, sideLabel }) => {
   const safeSide = sanitizeFileToken(sideLabel, "side");
   return `${safeProduct}-${safeSide}.png`;
 };
-

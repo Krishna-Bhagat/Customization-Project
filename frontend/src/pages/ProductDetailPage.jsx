@@ -9,7 +9,7 @@ import ProductSkeletonGrid from "../components/ProductSkeletonGrid.jsx";
 import SizeChartModal from "../components/SizeChartModal.jsx";
 import StepProgress from "../components/StepProgress.jsx";
 import { useToast } from "../components/ToastProvider.jsx";
-import { readCustomizationSession, writeCustomizationSession } from "../utils/customizationSession.js";
+import { writeCustomizationSession } from "../utils/customizationSession.js";
 import { buildProductSideOptions, toSideKey } from "../utils/productSides.js";
 
 const getProductDescription = (product) => {
@@ -87,17 +87,12 @@ const ProductDetailPage = () => {
           fallbackImage: productImages[0] || found.imageUrl || ""
         });
 
-        const existingSession = readCustomizationSession(id) || {};
         const availableSizes = found.availableSizes || [];
 
         const querySize = availableSizes.includes(requestedSize) ? requestedSize : "";
-        const sessionSize = availableSizes.includes(existingSession.selectedSize)
-          ? existingSession.selectedSize
-          : "";
-
-        setSelectedSize(querySize || sessionSize || availableSizes[0] || "");
-        setQuantity(Number(existingSession.quantity) > 0 ? Number(existingSession.quantity) : 1);
-        setSelectedSides(normalizeSelectedSides(existingSession.selectedSides, sideOptions));
+        setSelectedSize(querySize || availableSizes[0] || "");
+        setQuantity(1);
+        setSelectedSides(normalizeSelectedSides([], sideOptions));
       } catch (error) {
         setErrorMessage(error.response?.data?.message || "Failed to load product details.");
       } finally {
@@ -151,7 +146,11 @@ const ProductDetailPage = () => {
       selectedSize,
       quantity,
       selectedSides: normalizedSelectedSides,
-      activeSide: normalizedSelectedSides[0] || "front"
+      activeSide: normalizedSelectedSides[0] || "front",
+      source: "product-flow",
+      cartItemId: "",
+      canvasStates: {},
+      sidePreviewRefs: {}
     };
 
     writeCustomizationSession(id, next);
@@ -198,7 +197,11 @@ const ProductDetailPage = () => {
       selectedSize,
       quantity,
       selectedSides: normalizedSelectedSides,
-      activeSide: normalizedSelectedSides[0] || "front"
+      activeSide: normalizedSelectedSides[0] || "front",
+      source: "product-flow",
+      cartItemId: "",
+      canvasStates: {},
+      sidePreviewRefs: {}
     });
 
     setIsPrintSheetOpen(false);

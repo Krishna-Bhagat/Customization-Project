@@ -11,6 +11,7 @@ import {
   clearCustomizationSession,
   readCustomizationSession
 } from "../utils/customizationSession.js";
+import { saveDesignPreview, sanitizeSidePreviewRefs } from "../utils/designPreviewStore.js";
 import {
   buildProductSideOptions,
   formatSideLabel,
@@ -108,7 +109,8 @@ const ReviewCheckoutPage = () => {
           selectedSize: session.selectedSize || "",
           quantity: Number(session.quantity) > 0 ? Number(session.quantity) : 1,
           selectedSides: normalizedSelectedSides,
-          designExports: normalizedDesignExports
+          designExports: normalizedDesignExports,
+          sidePreviewRefs: sanitizeSidePreviewRefs(session.sidePreviewRefs || {})
         });
       } catch (error) {
         setErrorMessage(error.response?.data?.message || "Failed to load checkout information.");
@@ -198,6 +200,76 @@ const ReviewCheckoutPage = () => {
       orientationClass
     };
   };
+
+  useEffect(() => {
+    if (!product || !sessionData) {
+      return;
+    }
+
+    let active = true;
+
+    const generateSidePreviewCache = async () => {
+      const existingRefs = sanitizeSidePreviewRefs(sessionData.sidePreviewRefs || {});
+      const nextRefs = { ...existingRefs };
+      let updated = false;
+
+      for (const sideKey of previewSides) {
+        if (nextRefs[sideKey]) {
+          // eslint-disable-next-line no-continue
+          continue;
+        }
+
+        const { area, previewUrl, sideImage } = resolveSidePreviewData(sideKey);
+        if (!previewUrl || !sideImage || !area) {
+          // eslint-disable-next-line no-continue
+          continue;
+        }
+
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          const composedPreview = await composeMockupPreview({
+            mockupUrl: sideImage,
+            designUrl: previewUrl,
+            printableArea: area,
+            canvasWidth: CANVAS_DIMENSIONS.width,
+            canvasHeight: CANVAS_DIMENSIONS.height,
+            multiplier: 1.45,
+            format: "webp",
+            quality: 0.72
+          });
+
+          // eslint-disable-next-line no-await-in-loop
+          const previewRef = await saveDesignPreview({
+            productId: id,
+            sideKey,
+            dataUrl: composedPreview
+          });
+
+          if (previewRef) {
+            nextRefs[sideKey] = previewRef;
+            updated = true;
+          }
+        } catch {
+          // Non-blocking: review flow works without preview cache.
+        }
+      }
+
+      if (!active || !updated) {
+        return;
+      }
+
+      setSessionData((prev) => ({
+        ...(prev || {}),
+        sidePreviewRefs: nextRefs
+      }));
+    };
+
+    generateSidePreviewCache();
+
+    return () => {
+      active = false;
+    };
+  }, [id, previewSides, product, sessionData, sideOptions]);
 
   const downloadSidePreview = async (side, { manageLoading = true } = {}) => {
     if (!product || !sessionData) {
@@ -611,7 +683,7 @@ const ReviewCheckoutPage = () => {
             >
               <h3 className="font-heading text-lg font-semibold text-slate-900">Order Confirmed</h3>
               <p className="mt-1 text-sm text-slate-600">
-                Download your design previews before finishing. Your local draft will be cleared when you finish.
+                Download your design previews before finishing. Your local customization session will be cleared when you finish.
               </p>
 
               <div className="mt-4 grid gap-2 sm:grid-cols-2">

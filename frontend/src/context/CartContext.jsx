@@ -8,22 +8,54 @@ import {
   updateCartItem as updateCartItemApi
 } from "../api/index.js";
 import { getWithExpiry, removeKey, setWithExpiry, THIRTY_DAYS_MS } from "../utils/storageExpiry.js";
+import {
+  assetIdFromUri,
+  sanitizeCustomizationStateForStorage
+} from "../utils/customizationStorage.js";
+import { debugLog, debugWarn } from "../utils/devLogger.js";
+import {
+  clearCustomizationSession,
+  readCustomizationSession
+} from "../utils/customizationSession.js";
+import { clearDesignAssetsByIds } from "../utils/designAssetStore.js";
+import {
+  clearDesignPreviewsByRefs,
+  sanitizeSidePreviewRefs
+} from "../utils/designPreviewStore.js";
 import { useUserAuth } from "./UserAuthContext.jsx";
 
 const CartContext = createContext(null);
 const GUEST_CART_KEY = "giftcraft-guest-cart";
 
+const normalizeGuestItem = (item) => ({
+  ...item,
+  selectedSize: String(item?.selectedSize || "").trim().toUpperCase(),
+  quantity: Math.min(Math.max(Number(item?.quantity) || 1, 1), 99),
+  selectedSides: normalizeSides(item?.selectedSides),
+  customizationState: sanitizeCustomizationStateForStorage(item?.customizationState || {}),
+  previewImage: String(item?.previewImage || "").trim()
+});
+
+const toStoredGuestItem = (item) => ({
+  ...normalizeGuestItem(item),
+  previewImage: ""
+});
+
 const readGuestCart = () => {
   const value = getWithExpiry(GUEST_CART_KEY);
-  return Array.isArray(value) ? value : [];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => normalizeGuestItem(item));
 };
 
 const writeGuestCart = (items) => {
-  setWithExpiry({
+  const ok = setWithExpiry({
     key: GUEST_CART_KEY,
-    value: items,
+    value: items.map((item) => toStoredGuestItem(item)),
     ttlMs: THIRTY_DAYS_MS
   });
+  return ok;
 };
 
 const removeGuestCart = () => {
@@ -40,10 +72,100 @@ const canMergeGuestItem = (a, b) =>
   String(a.selectedSize || "") === String(b.selectedSize || "") &&
   JSON.stringify(normalizeSides(a.selectedSides)) === JSON.stringify(normalizeSides(b.selectedSides));
 
+const collectAssetIdsFromCanvasStates = (canvasStates) => {
+  const snapshots = canvasStates && typeof canvasStates === "object" ? Object.values(canvasStates) : [];
+  const assetIds = new Set();
+
+  snapshots.forEach((snapshot) => {
+    let parsed = snapshot;
+    if (typeof parsed === "string") {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch {
+        parsed = null;
+      }
+    }
+
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.objects)) {
+      return;
+    }
+
+    parsed.objects.forEach((object) => {
+      if (!object || object.type !== "image") {
+        return;
+      }
+      const assetId =
+        assetIdFromUri(object.src) || String(object.giftAssetId || "").trim();
+      if (assetId) {
+        assetIds.add(assetId);
+      }
+    });
+  });
+
+  return Array.from(assetIds);
+};
+
 export const CartProvider = ({ children }) => {
   const { token, isAuthenticated, isInitializing } = useUserAuth();
   const [items, setItems] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+
+  const cleanupRemovedItemCustomization = async ({
+    removedItem,
+    remainingItems
+  }) => {
+    const productId = Number(removedItem?.productId || removedItem?.product?.id);
+    if (!Number.isFinite(productId) || productId <= 0) {
+      return;
+    }
+
+    const removedCustomization = removedItem?.customizationState || {};
+    const removedPreviewRefs = sanitizeSidePreviewRefs(removedCustomization.sidePreviewRefs || {});
+    const removedAssetIds = collectAssetIdsFromCanvasStates(removedCustomization.canvasStates || {});
+    const remainingPreviewRefs = new Set(
+      remainingItems.flatMap((item) =>
+        Object.values(sanitizeSidePreviewRefs(item?.customizationState?.sidePreviewRefs || {}))
+      )
+    );
+    const remainingAssetIds = new Set(
+      remainingItems.flatMap((item) =>
+        collectAssetIdsFromCanvasStates(item?.customizationState?.canvasStates || {})
+      )
+    );
+    const previewRefsToDelete = Object.entries(removedPreviewRefs).reduce((acc, [side, ref]) => {
+      if (!remainingPreviewRefs.has(ref)) {
+        acc[side] = ref;
+      }
+      return acc;
+    }, {});
+    const assetIdsToDelete = removedAssetIds.filter((assetId) => !remainingAssetIds.has(assetId));
+    await Promise.all([
+      clearDesignPreviewsByRefs(previewRefsToDelete),
+      clearDesignAssetsByIds(assetIdsToDelete)
+    ]);
+
+    const removedItemId = String(removedItem?.id || "");
+    const localSession = readCustomizationSession(productId);
+    if (
+      removedItemId &&
+      localSession?.source === "cart-edit" &&
+      String(localSession?.cartItemId || "") === removedItemId
+    ) {
+      clearCustomizationSession(productId, { clearStoredMedia: false });
+    }
+
+    const hasRemainingForProduct = remainingItems.some(
+      (candidate) => Number(candidate?.productId || candidate?.product?.id) === productId
+    );
+    if (hasRemainingForProduct) {
+      return;
+    }
+
+    clearCustomizationSession(productId);
+    debugLog("cart", "Cleared product customization after cart item removal", {
+      productId: String(productId)
+    });
+  };
 
   const loadCart = async () => {
     if (isInitializing) {
@@ -54,8 +176,12 @@ export const CartProvider = ({ children }) => {
 
     try {
       if (isAuthenticated && token) {
-        const guestItems = readGuestCart();
+        const memoryGuestItems = items.filter((item) => String(item?.id || "").startsWith("guest-"));
+        const guestItems = memoryGuestItems.length > 0 ? memoryGuestItems : readGuestCart();
         if (guestItems.length > 0) {
+          debugLog("cart", "Merging guest cart into user cart", {
+            count: guestItems.length
+          });
           const merged = await mergeGuestCartApi({ token, items: guestItems });
           setItems(merged.items || []);
           removeGuestCart();
@@ -93,10 +219,14 @@ export const CartProvider = ({ children }) => {
       product: payload.product || {}
     };
 
-    const current = readGuestCart();
+    const current =
+      items.length > 0 && items.every((item) => String(item?.id || "").startsWith("guest-"))
+        ? [...items]
+        : readGuestCart();
     const index = current.findIndex((item) => canMergeGuestItem(item, nextItem));
 
     let nextItems;
+    let addedItem;
     if (index >= 0) {
       nextItems = [...current];
       nextItems[index] = {
@@ -105,13 +235,28 @@ export const CartProvider = ({ children }) => {
         customizationState: nextItem.customizationState,
         previewImage: nextItem.previewImage || nextItems[index].previewImage
       };
+      addedItem = nextItems[index];
     } else {
       nextItems = [nextItem, ...current];
+      addedItem = nextItem;
     }
 
-    writeGuestCart(nextItems);
+    const persisted = writeGuestCart(nextItems);
+    if (!persisted) {
+      debugWarn("cart", "Guest cart write failed due storage limits", {
+        count: nextItems.length
+      });
+    }
+
+    debugLog("cart", "Guest cart updated", {
+      count: nextItems.length,
+      persisted
+    });
     setItems(nextItems);
-    return nextItem;
+    return {
+      ...addedItem,
+      __storagePersisted: persisted
+    };
   };
 
   const addToCart = async (payload) => {
@@ -132,7 +277,10 @@ export const CartProvider = ({ children }) => {
       return response.items || [];
     }
 
-    const current = readGuestCart();
+    const current =
+      items.length > 0 && items.every((item) => String(item?.id || "").startsWith("guest-"))
+        ? items
+        : readGuestCart();
     const next = current.map((item) => {
       if (String(item.id) !== String(itemId)) {
         return item;
@@ -143,29 +291,73 @@ export const CartProvider = ({ children }) => {
         quantity: payload.quantity ? Math.min(Math.max(Number(payload.quantity), 1), 99) : item.quantity
       };
     });
-    writeGuestCart(next);
+    const persisted = writeGuestCart(next);
+    if (!persisted) {
+      debugWarn("cart", "Guest cart update could not be persisted", {
+        itemId: String(itemId)
+      });
+    }
     setItems(next);
     return next;
   };
 
   const removeFromCart = async (itemId) => {
     if (isAuthenticated && token) {
+      const currentItems = items.length > 0 ? [...items] : [];
+      const removedItem = currentItems.find((item) => String(item.id) === String(itemId));
       const response = await deleteCartItemApi({ token, itemId });
-      setItems(response.items || []);
+      const nextItems = response.items || [];
+      setItems(nextItems);
+      if (removedItem) {
+        await cleanupRemovedItemCustomization({
+          removedItem,
+          remainingItems: nextItems
+        });
+      }
       return;
     }
 
-    const next = readGuestCart().filter((item) => String(item.id) !== String(itemId));
-    writeGuestCart(next);
+    const source =
+      items.length > 0 && items.every((item) => String(item?.id || "").startsWith("guest-"))
+        ? items
+        : readGuestCart();
+    const removedItem = source.find((item) => String(item.id) === String(itemId));
+    const next = source.filter((item) => String(item.id) !== String(itemId));
+    const persisted = writeGuestCart(next);
+    if (!persisted && next.length === 0) {
+      removeGuestCart();
+    } else if (!persisted) {
+      debugWarn("cart", "Guest cart remove could not be persisted", {
+        itemId: String(itemId),
+        remainingCount: next.length
+      });
+    }
     setItems(next);
+    if (removedItem) {
+      await cleanupRemovedItemCustomization({
+        removedItem,
+        remainingItems: next
+      });
+    }
   };
 
   const clearCart = async () => {
+    const productIds = Array.from(
+      new Set(
+        (items || [])
+          .map((item) => Number(item?.productId || item?.product?.id))
+          .filter((productId) => Number.isFinite(productId) && productId > 0)
+      )
+    );
+
     if (isAuthenticated && token) {
       await clearCartApi(token);
+      productIds.forEach((productId) => clearCustomizationSession(productId));
       setItems([]);
       return;
     }
+
+    productIds.forEach((productId) => clearCustomizationSession(productId));
     removeGuestCart();
     setItems([]);
   };

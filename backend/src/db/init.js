@@ -124,12 +124,34 @@ export const initializeDatabase = async () => {
         active_side VARCHAR(120),
         canvas_states JSONB NOT NULL DEFAULT '{}'::JSONB,
         design_exports JSONB NOT NULL DEFAULT '{}'::JSONB,
+        side_preview_refs JSONB NOT NULL DEFAULT '{}'::JSONB,
         preview_image TEXT,
+        draft_mode VARCHAR(20) NOT NULL DEFAULT 'auto' CHECK (draft_mode IN ('auto', 'manual')),
         saved_at TIMESTAMPTZ DEFAULT NOW(),
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW(),
         UNIQUE(user_id, product_id)
       );
+    `);
+
+    await client.query(`
+      ALTER TABLE drafts
+      ADD COLUMN IF NOT EXISTS side_preview_refs JSONB NOT NULL DEFAULT '{}'::JSONB;
+    `);
+
+    await client.query(`
+      ALTER TABLE drafts
+      ADD COLUMN IF NOT EXISTS draft_mode VARCHAR(20) NOT NULL DEFAULT 'auto';
+    `);
+
+    await client.query(`
+      ALTER TABLE drafts
+      DROP CONSTRAINT IF EXISTS drafts_draft_mode_check;
+    `);
+
+    await client.query(`
+      ALTER TABLE drafts
+      ADD CONSTRAINT drafts_draft_mode_check CHECK (draft_mode IN ('auto', 'manual'));
     `);
 
     await client.query(`

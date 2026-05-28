@@ -1,9 +1,9 @@
 import { AnimatePresence, motion } from "framer-motion";
+import { fabric } from "fabric";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   createUserOrder,
-  deleteDraft,
   fetchProducts,
   uploadDesign
 } from "../api/index.js";
@@ -14,6 +14,8 @@ import { CANVAS_DIMENSIONS, getPrintableArea } from "../constants/customizer.js"
 import { useCart } from "../context/CartContext.jsx";
 import { useUserAuth } from "../context/UserAuthContext.jsx";
 import { clearCustomizationSession } from "../utils/customizationSession.js";
+import { assetIdFromUri } from "../utils/customizationStorage.js";
+import { readDesignAssetDataUrl } from "../utils/designAssetStore.js";
 import {
   buildDesignFileName,
   composeMockupPreview,
@@ -44,6 +46,87 @@ const normalizeDesignExports = (item) =>
     }
     return acc;
   }, {});
+
+const hydrateSnapshotAssets = async (snapshot) => {
+  let parsed = snapshot;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return null;
+    }
+  }
+
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.objects)) {
+    return parsed;
+  }
+
+  const objects = await Promise.all(
+    parsed.objects.map(async (object) => {
+      if (!object || object.type !== "image") {
+        return object;
+      }
+
+      const assetId = assetIdFromUri(object.src) || String(object.giftAssetId || "").trim();
+      if (!assetId) {
+        return object;
+      }
+
+      const resolvedSrc = await readDesignAssetDataUrl(assetId);
+      if (!resolvedSrc) {
+        return object;
+      }
+
+      return {
+        ...object,
+        src: resolvedSrc,
+        giftAssetId: assetId
+      };
+    })
+  );
+
+  return {
+    ...parsed,
+    objects
+  };
+};
+
+const buildDesignExportFromSnapshot = async ({ snapshot, sideKey, category }) => {
+  const hydrated = await hydrateSnapshotAssets(snapshot);
+  if (!hydrated) {
+    return "";
+  }
+
+  return new Promise((resolve) => {
+    const element = document.createElement("canvas");
+    const tempCanvas = new fabric.StaticCanvas(element, {
+      width: CANVAS_DIMENSIONS.width,
+      height: CANVAS_DIMENSIONS.height
+    });
+
+    tempCanvas.loadFromJSON(hydrated, () => {
+      const area = getPrintableArea(category, sideKey);
+      const hasObjects = (tempCanvas.getObjects().length || 0) > 0;
+      if (!hasObjects) {
+        tempCanvas.dispose();
+        resolve("");
+        return;
+      }
+
+      const dataUrl = tempCanvas.toDataURL({
+        format: "png",
+        left: area.left,
+        top: area.top,
+        width: area.width,
+        height: area.height,
+        multiplier: 2
+      });
+
+      tempCanvas.dispose();
+      resolve(dataUrl);
+    });
+  });
+};
 
 const CheckoutPage = () => {
   const navigate = useNavigate();
@@ -221,16 +304,12 @@ const CheckoutPage = () => {
 
     for (const item of cleanupItems) {
       clearCustomizationSession(item.productId);
-      if (token && item.productId) {
-        // eslint-disable-next-line no-await-in-loop
-        await deleteDraft({ token, productId: item.productId }).catch(() => {});
-      }
     }
 
     await clearCart();
     setIsPostOrderPromptOpen(false);
     setPostOrderData(null);
-    pushToast({ type: "success", message: "Checkout completed. Cart and drafts cleared." });
+    pushToast({ type: "success", message: "Checkout completed. Cart customization cleared." });
     navigate("/orders");
   };
 
@@ -262,7 +341,37 @@ const CheckoutPage = () => {
       const preparedItems = [];
 
       for (const item of orderItems) {
-        const designExports = item.customizationState?.designExports || {};
+        let designExports = item.customizationState?.designExports || {};
+        const hasInlineExports = Object.values(designExports).some(Boolean);
+        if (!hasInlineExports) {
+          const canvasStates = item.customizationState?.canvasStates || {};
+          const selectedSideKeys = Array.isArray(item.selectedSides)
+            ? item.selectedSides.map((side) => toSideKey(side))
+            : [];
+          const fallbackSideKeys = Object.keys(canvasStates).map((side) => toSideKey(side));
+          const sideKeys = Array.from(new Set([...selectedSideKeys, ...fallbackSideKeys].filter(Boolean)));
+
+          const rebuilt = {};
+          for (const sideKey of sideKeys) {
+            const snapshot = canvasStates[sideKey];
+            if (!snapshot) {
+              // eslint-disable-next-line no-continue
+              continue;
+            }
+            // eslint-disable-next-line no-await-in-loop
+            const rebuiltDataUrl = await buildDesignExportFromSnapshot({
+              snapshot,
+              sideKey,
+              category: item.product?.category || ""
+            });
+            if (rebuiltDataUrl) {
+              rebuilt[sideKey] = rebuiltDataUrl;
+            }
+          }
+
+          designExports = rebuilt;
+        }
+
         const hasDesign = Object.values(designExports).some(Boolean);
         if (!hasDesign) {
           throw new Error(`Missing design for ${item.product?.name || "item"}.`);

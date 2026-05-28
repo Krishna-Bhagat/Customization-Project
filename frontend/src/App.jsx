@@ -1,8 +1,9 @@
 import { Suspense, lazy } from "react";
-import { Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
+import { Navigate, Route, Routes, matchPath, useLocation, useParams } from "react-router-dom";
 import MobileBottomNav from "./components/MobileBottomNav.jsx";
 import Navbar from "./components/Navbar.jsx";
 import PageSkeleton from "./components/PageSkeleton.jsx";
+import RouteScrollManager from "./components/RouteScrollManager.jsx";
 import SiteFooter from "./components/SiteFooter.jsx";
 
 const HomePage = lazy(() => import("./pages/HomePage.jsx"));
@@ -23,16 +24,23 @@ const LegacyCustomizeRedirect = () => {
 
 const App = () => {
   const location = useLocation();
-  const isAdminRoute = /^\/admin(?:\/.*)?$/.test(location.pathname);
-  const isProductDetailPage = /^\/product\/[^/]+\/?$/.test(location.pathname);
-  const isWorkspacePage = /^\/customize\/[^/]+\/workspace\/?$/.test(location.pathname);
-  const isCheckoutPage = /^\/customize\/[^/]+\/checkout\/?$/.test(location.pathname);
-  const isProductFlowPage = isProductDetailPage || isWorkspacePage || isCheckoutPage;
-  const isImmersiveFlowPage = isWorkspacePage || isCheckoutPage;
-  const isCustomerChromeVisible = !isAdminRoute && !isProductFlowPage;
+  const pathname = location.pathname;
+
+  const isAdminRoute = Boolean(matchPath({ path: "/admin/*", end: false }, pathname));
+  const isHomePage = pathname === "/";
+  const isProductDetailPage = Boolean(matchPath({ path: "/product/:id/*", end: false }, pathname));
+  const isWorkspacePage = Boolean(matchPath({ path: "/customize/:id/workspace/*", end: false }, pathname));
+  const isReviewPage = Boolean(matchPath({ path: "/customize/:id/checkout/*", end: false }, pathname));
+  const isProductFlowPage = isProductDetailPage || isWorkspacePage || isReviewPage;
+  const isImmersiveFlowPage = isWorkspacePage || isReviewPage;
+
+  // Keep the full marketing footer only on storefront marketing surfaces.
+  const showFooter = !isAdminRoute && isHomePage;
+  const showMobileBottomNav = !isAdminRoute && !isProductFlowPage;
 
   return (
     <div className={isAdminRoute ? "min-h-screen bg-slate-100" : "min-h-screen bg-slate-50"}>
+      <RouteScrollManager />
       {!isAdminRoute && !isImmersiveFlowPage ? <Navbar /> : null}
       <main
         className={
@@ -60,8 +68,8 @@ const App = () => {
           </Routes>
         </Suspense>
       </main>
-      {isCustomerChromeVisible ? <SiteFooter /> : null}
-      {isCustomerChromeVisible ? <MobileBottomNav /> : null}
+      {showFooter ? <SiteFooter /> : null}
+      {showMobileBottomNav ? <MobileBottomNav /> : null}
     </div>
   );
 };

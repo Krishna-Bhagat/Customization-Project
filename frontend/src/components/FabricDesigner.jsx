@@ -8,6 +8,16 @@ import {
   getPrintableArea,
   normalizeSideKey
 } from "../constants/customizer.js";
+import {
+  assetIdFromUri,
+  sanitizeCanvasSnapshotForStorage
+} from "../utils/customizationStorage.js";
+import {
+  cleanupExpiredDesignAssets,
+  readDesignAssetDataUrl,
+  saveDesignAsset
+} from "../utils/designAssetStore.js";
+import { debugWarn } from "../utils/devLogger.js";
 
 const buildFallbackMockup = (category) => {
   const label = encodeURIComponent(String(category || "Custom Product").toUpperCase());
@@ -44,22 +54,53 @@ const normalizePrintableArea = (area, category, sideKey) => {
   };
 };
 
+const isTextObject = (object) =>
+  Boolean(object) &&
+  ["i-text", "textbox", "text"].includes(String(object.type || "").toLowerCase());
+
+const trimLayerText = (value, maxLength = 22) => {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "Text";
+  }
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(maxLength - 3, 1))}...`;
+};
+
 const getObjectLabel = (object, index) => {
   if (!object) {
     return `Layer ${index + 1}`;
   }
 
-  if (object.type === "textbox") {
-    const preview = String(object.text || "Text").trim();
-    return preview ? `Text: ${preview.slice(0, 20)}` : "Text";
+  if (isTextObject(object)) {
+    return trimLayerText(object.text || "Text");
   }
 
   if (object.type === "image") {
-    return `Image ${index + 1}`;
+    return `Photo ${index + 1}`;
   }
 
   return `Object ${index + 1}`;
 };
+
+const normalizeTextColor = (value) => {
+  const candidate = String(value || "").trim();
+  if (!candidate) {
+    return "#0f172a";
+  }
+
+  if (/^#([A-Fa-f0-9]{3}|[A-Fa-f0-9]{6})$/.test(candidate)) {
+    return candidate;
+  }
+
+  return "#0f172a";
+};
+
+const createObjectId = () => `obj-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+const getObjectId = (object) => String(object?.giftObjectId || "").trim();
 
 const ToolbarIcon = ({ type }) => {
   if (type === "upload") {
@@ -120,7 +161,49 @@ const ToolbarIcon = ({ type }) => {
   return null;
 };
 
+const LayerIcon = ({ type }) => {
+  if (type === "text") {
+    return (
+      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M4 6h16" />
+        <path d="M12 6v12" />
+      </svg>
+    );
+  }
+
+  if (type === "image") {
+    return (
+      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <circle cx="9" cy="10" r="1.2" />
+        <path d="m21 16-5-5-4 4-2-2-5 5" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+      <rect x="5" y="5" width="14" height="14" rx="2" />
+    </svg>
+  );
+};
+
+const SheetCloseButton = ({ onClick, label = "Close panel" }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    aria-label={label}
+    className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 transition hover:bg-slate-50 hover:text-slate-700 active:scale-[0.98]"
+  >
+    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="m6 6 12 12" />
+      <path d="m18 6-12 12" />
+    </svg>
+  </button>
+);
+
 const FabricDesigner = ({
+  productId,
   productImage,
   productImages = [],
   category,
@@ -190,12 +273,18 @@ const FabricDesigner = ({
   });
   const [isTextDrawerOpen, setIsTextDrawerOpen] = useState(false);
   const [isLayersDrawerOpen, setIsLayersDrawerOpen] = useState(false);
+  const [isEditingExistingText, setIsEditingExistingText] = useState(false);
   const [textValue, setTextValue] = useState("Gift vibes");
   const [fontFamily, setFontFamily] = useState(FONT_OPTIONS[0]);
   const [fontColor, setFontColor] = useState("#0f172a");
   const [fontSize, setFontSize] = useState(34);
+  const [fontWeight, setFontWeight] = useState("normal");
+  const [fontStyle, setFontStyle] = useState("normal");
+  const [textUnderline, setTextUnderline] = useState(false);
+  const [textAlign, setTextAlign] = useState("left");
   const [historyStamp, setHistoryStamp] = useState(0);
   const [layerStamp, setLayerStamp] = useState(0);
+  const [selectedObjectId, setSelectedObjectId] = useState("");
   const [snapGuide, setSnapGuide] = useState({ x: false, y: false });
 
   const fileInputRef = useRef(null);
@@ -204,6 +293,11 @@ const FabricDesigner = ({
   const canvasInstancesRef = useRef({});
   const historyRef = useRef({});
   const isRestoringRef = useRef({});
+  const restoreVersionRef = useRef({});
+  const snapshotAppliedRef = useRef({});
+  const previousActiveSideRef = useRef("");
+  const editingTextTargetRef = useRef(null);
+  const lastTapRef = useRef({ side: "", target: null, timestamp: 0 });
   const [stageScale, setStageScale] = useState(1);
 
   const resolvedMockupImages = useMemo(() => {
@@ -279,6 +373,92 @@ const FabricDesigner = ({
     return historyRef.current[side];
   }, []);
 
+  const ensureObjectIdentity = useCallback((object) => {
+    if (!object) {
+      return "";
+    }
+
+    const existingId = getObjectId(object);
+    if (existingId) {
+      return existingId;
+    }
+
+    const createdId = createObjectId();
+    object.set("giftObjectId", createdId);
+    return createdId;
+  }, []);
+
+  const openTextEditorForObject = useCallback(
+    (object) => {
+      if (!isTextObject(object)) {
+        return;
+      }
+
+      editingTextTargetRef.current = object;
+      setSelectedObjectId(ensureObjectIdentity(object));
+      setTextValue(String(object.text || ""));
+      setFontFamily(String(object.fontFamily || FONT_OPTIONS[0]));
+      setFontColor(normalizeTextColor(object.fill));
+      setFontSize(Number(object.fontSize) > 0 ? Math.round(Number(object.fontSize)) : 34);
+      setFontWeight(String(object.fontWeight || "normal").toLowerCase() === "bold" ? "bold" : "normal");
+      setFontStyle(String(object.fontStyle || "normal").toLowerCase() === "italic" ? "italic" : "normal");
+      setTextUnderline(Boolean(object.underline));
+      setTextAlign(String(object.textAlign || "left"));
+      setIsEditingExistingText(true);
+      setIsLayersDrawerOpen(false);
+      setIsTextDrawerOpen(true);
+    },
+    [ensureObjectIdentity]
+  );
+
+  const resetTextEditorState = useCallback(() => {
+    editingTextTargetRef.current = null;
+    setIsEditingExistingText(false);
+    setTextValue("Gift vibes");
+    setFontFamily(FONT_OPTIONS[0]);
+    setFontColor("#0f172a");
+    setFontSize(34);
+    setFontWeight("normal");
+    setFontStyle("normal");
+    setTextUnderline(false);
+    setTextAlign("left");
+  }, []);
+
+  const applyCanvasVisibility = useCallback(
+    (targetSide) => {
+      Object.entries(canvasInstancesRef.current).forEach(([side, canvas]) => {
+        if (!canvas) {
+          return;
+        }
+
+        const isActive = String(side) === String(targetSide);
+        const wrapper = canvas.wrapperEl;
+        if (wrapper) {
+          wrapper.style.position = "absolute";
+          wrapper.style.left = "0";
+          wrapper.style.top = "0";
+          wrapper.style.width = `${CANVAS_DIMENSIONS.width}px`;
+          wrapper.style.height = `${CANVAS_DIMENSIONS.height}px`;
+          wrapper.style.transition = "opacity 180ms ease";
+          wrapper.style.opacity = isActive ? "1" : "0";
+          wrapper.style.visibility = isActive ? "visible" : "hidden";
+          wrapper.style.pointerEvents = isActive ? "auto" : "none";
+          wrapper.style.zIndex = isActive ? "20" : "0";
+        }
+
+        if (canvas.upperCanvasEl) {
+          canvas.upperCanvasEl.style.pointerEvents = isActive ? "auto" : "none";
+          canvas.upperCanvasEl.style.touchAction = "none";
+        }
+
+        if (canvas.lowerCanvasEl) {
+          canvas.lowerCanvasEl.style.backgroundColor = "transparent";
+        }
+      });
+    },
+    []
+  );
+
   const applyCanvasFrame = useCallback(
     (canvas, side) => {
       const area = getAreaForSide(side);
@@ -296,7 +476,10 @@ const FabricDesigner = ({
     [getAreaForSide]
   );
 
-  const snapshotCanvas = useCallback((canvas) => JSON.stringify(canvas.toDatalessJSON()), []);
+  const snapshotCanvas = useCallback((canvas) => {
+    const rawSnapshot = canvas.toDatalessJSON(["giftAssetId", "giftAssetProductId", "giftObjectId"]);
+    return sanitizeCanvasSnapshotForStorage(rawSnapshot);
+  }, []);
 
   const pushHistory = useCallback(
     (side, { force = false } = {}) => {
@@ -411,16 +594,26 @@ const FabricDesigner = ({
     if (!object) {
       return;
     }
+    ensureObjectIdentity(object);
 
     object.set({
       transparentCorners: false,
       cornerStyle: "circle",
       cornerSize: 12,
+      padding: 3,
       cornerColor: "#0f766e",
       cornerStrokeColor: "#ffffff",
       borderColor: "#0f766e",
       borderDashArray: [4, 4],
       lockUniScaling: false,
+      lockScalingFlip: false,
+      lockMovementX: false,
+      lockMovementY: false,
+      lockRotation: false,
+      hasControls: true,
+      hasBorders: true,
+      selectable: true,
+      evented: true,
       objectCaching: false
     });
 
@@ -437,30 +630,113 @@ const FabricDesigner = ({
         mtr: true
       });
     }
+  }, [ensureObjectIdentity]);
+
+  const hydrateSnapshotAssets = useCallback(async (snapshot) => {
+    let parsed = snapshot;
+
+    if (typeof parsed === "string") {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch {
+        return null;
+      }
+    }
+
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+
+    if (!Array.isArray(parsed.objects)) {
+      return parsed;
+    }
+
+    const hydratedObjects = await Promise.all(
+      parsed.objects.map(async (object) => {
+        if (!object || object.type !== "image") {
+          return object;
+        }
+
+        const srcAssetId = assetIdFromUri(object.src);
+        const declaredAssetId = String(object.giftAssetId || "").trim();
+        const assetId = srcAssetId || declaredAssetId;
+        if (!assetId) {
+          return object;
+        }
+
+        const resolvedSrc = await readDesignAssetDataUrl(assetId);
+        if (!resolvedSrc) {
+          return object;
+        }
+
+        return {
+          ...object,
+          src: resolvedSrc,
+          giftAssetId: assetId
+        };
+      })
+    );
+
+    return {
+      ...parsed,
+      objects: hydratedObjects
+    };
   }, []);
 
   const restoreFromSnapshot = useCallback(
-    (side, snapshot) => {
+    async (side, snapshot) => {
       const canvas = getCanvas(side);
       if (!canvas) {
         return;
       }
 
+      const restoreVersion = Number(restoreVersionRef.current[side] || 0) + 1;
+      restoreVersionRef.current[side] = restoreVersion;
       isRestoringRef.current[side] = true;
+      const isLatestRestore = () => restoreVersionRef.current[side] === restoreVersion;
 
-      canvas.loadFromJSON(snapshot, () => {
+      const hydratedSnapshot = await hydrateSnapshotAssets(snapshot);
+      if (!isLatestRestore()) {
+        return;
+      }
+      if (!hydratedSnapshot) {
+        canvas.clear();
+        applyCanvasFrame(canvas, side);
+        canvas.requestRenderAll();
+        isRestoringRef.current[side] = false;
+        return;
+      }
+
+      canvas.loadFromJSON(hydratedSnapshot, () => {
+        if (!isLatestRestore()) {
+          return;
+        }
         applyCanvasFrame(canvas, side);
         canvas.getObjects().forEach((object) => {
           applyInteractiveDefaults(object);
+          ensureObjectIdentity(object);
+          object.set({
+            objectCaching: false
+          });
           object.setCoords();
         });
+
         canvas.renderAll();
+        canvas.requestRenderAll();
+        canvas.discardActiveObject();
+        if (activeSide === side) {
+          setSelectedObjectId("");
+        }
+        window.requestAnimationFrame(() => {
+          canvas.renderAll();
+        });
+
         isRestoringRef.current[side] = false;
         setLayerStamp((prev) => prev + 1);
         setHistoryStamp((prev) => prev + 1);
       });
     },
-    [applyCanvasFrame, applyInteractiveDefaults, getCanvas]
+    [activeSide, applyCanvasFrame, applyInteractiveDefaults, ensureObjectIdentity, getCanvas, hydrateSnapshotAssets]
   );
 
   useEffect(() => {
@@ -476,6 +752,19 @@ const FabricDesigner = ({
         preserveObjectStacking: true,
         stopContextMenu: true
       });
+
+      if (canvas.wrapperEl) {
+        canvas.wrapperEl.style.position = "absolute";
+        canvas.wrapperEl.style.left = "0";
+        canvas.wrapperEl.style.top = "0";
+        canvas.wrapperEl.style.width = `${CANVAS_DIMENSIONS.width}px`;
+        canvas.wrapperEl.style.height = `${CANVAS_DIMENSIONS.height}px`;
+        canvas.wrapperEl.style.transition = "opacity 180ms ease";
+      }
+
+      if (canvas.upperCanvasEl) {
+        canvas.upperCanvasEl.style.touchAction = "none";
+      }
 
       applyCanvasFrame(canvas, side);
 
@@ -501,6 +790,61 @@ const FabricDesigner = ({
         setSnapGuide({ x: false, y: false });
       });
 
+      canvas.on("selection:created", (event) => {
+        const target = event.selected?.[0] || event.target || null;
+        setSelectedObjectId(target ? ensureObjectIdentity(target) : "");
+        setLayerStamp((prev) => prev + 1);
+        if (editingTextTargetRef.current && editingTextTargetRef.current !== target) {
+          resetTextEditorState();
+        }
+      });
+
+      canvas.on("selection:updated", (event) => {
+        const target = event.selected?.[0] || event.target || null;
+        setSelectedObjectId(target ? ensureObjectIdentity(target) : "");
+        setLayerStamp((prev) => prev + 1);
+        if (editingTextTargetRef.current && editingTextTargetRef.current !== target) {
+          resetTextEditorState();
+        }
+      });
+
+      canvas.on("selection:cleared", () => {
+        setSelectedObjectId("");
+        setLayerStamp((prev) => prev + 1);
+        if (editingTextTargetRef.current) {
+          resetTextEditorState();
+        }
+      });
+
+      canvas.on("mouse:dblclick", (event) => {
+        const target = event.target;
+        if (!isTextObject(target)) {
+          return;
+        }
+        openTextEditorForObject(target);
+      });
+
+      canvas.on("mouse:down", (event) => {
+        const target = event.target;
+        if (!isTextObject(target)) {
+          return;
+        }
+
+        const now = Date.now();
+        const prev = lastTapRef.current;
+        if (prev.side === side && prev.target === target && now - prev.timestamp <= 320) {
+          openTextEditorForObject(target);
+          lastTapRef.current = { side: "", target: null, timestamp: 0 };
+          return;
+        }
+
+        lastTapRef.current = {
+          side,
+          target,
+          timestamp: now
+        };
+      });
+
       canvas.on("object:added", (event) => {
         if (event?.target) {
           applyInteractiveDefaults(event.target);
@@ -510,6 +854,7 @@ const FabricDesigner = ({
           return;
         }
         pushHistory(side);
+        setLayerStamp((prev) => prev + 1);
       });
 
       canvas.on("object:modified", (event) => {
@@ -520,13 +865,16 @@ const FabricDesigner = ({
           return;
         }
         pushHistory(side);
+        setLayerStamp((prev) => prev + 1);
       });
 
       canvas.on("object:removed", () => {
+        setSelectedObjectId("");
         if (isRestoringRef.current[side]) {
           return;
         }
         pushHistory(side);
+        setLayerStamp((prev) => prev + 1);
       });
 
       canvasInstancesRef.current[side] = canvas;
@@ -534,6 +882,7 @@ const FabricDesigner = ({
       const incomingSnapshot = initialCanvasStates?.[side];
       if (incomingSnapshot) {
         restoreFromSnapshot(side, incomingSnapshot);
+        snapshotAppliedRef.current[side] = String(incomingSnapshot);
         window.setTimeout(() => pushHistory(side, { force: true }), 120);
       } else {
         pushHistory(side, { force: true });
@@ -548,23 +897,62 @@ const FabricDesigner = ({
       canvasInstancesRef.current[side]?.dispose();
       delete canvasInstancesRef.current[side];
       delete historyRef.current[side];
+      delete snapshotAppliedRef.current[side];
+      delete restoreVersionRef.current[side];
     });
+
+    applyCanvasVisibility(activeSide);
   }, [
+    activeSide,
     applyCanvasFrame,
+    applyCanvasVisibility,
     applyInteractiveDefaults,
     availableSides,
     clampObjectToArea,
+    ensureObjectIdentity,
     initialCanvasStates,
+    openTextEditorForObject,
     pushHistory,
+    resetTextEditorState,
     restoreFromSnapshot
   ]);
+
+  useEffect(() => {
+    availableSides.forEach((side) => {
+      const incomingSnapshot = initialCanvasStates?.[side];
+      if (!incomingSnapshot) {
+        return;
+      }
+
+      const serialized = String(incomingSnapshot);
+      if (snapshotAppliedRef.current[side] === serialized) {
+        return;
+      }
+
+      const canvas = getCanvas(side);
+      if (!canvas) {
+        return;
+      }
+
+      snapshotAppliedRef.current[side] = serialized;
+      restoreFromSnapshot(side, incomingSnapshot);
+      window.setTimeout(() => pushHistory(side, { force: true }), 140);
+    });
+  }, [availableSides, getCanvas, initialCanvasStates, pushHistory, restoreFromSnapshot]);
 
   useEffect(() => {
     return () => {
       Object.values(canvasInstancesRef.current).forEach((canvas) => canvas?.dispose());
       canvasInstancesRef.current = {};
       historyRef.current = {};
+      restoreVersionRef.current = {};
+      editingTextTargetRef.current = null;
+      lastTapRef.current = { side: "", target: null, timestamp: 0 };
     };
+  }, []);
+
+  useEffect(() => {
+    cleanupExpiredDesignAssets().catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -602,12 +990,33 @@ const FabricDesigner = ({
       return;
     }
 
+    applyCanvasVisibility(activeSide);
+
+    if (previousActiveSideRef.current && previousActiveSideRef.current !== activeSide) {
+      if (isEditingExistingText) {
+        resetTextEditorState();
+      }
+    }
+    previousActiveSideRef.current = activeSide;
+
     applyCanvasFrame(canvas, activeSide);
+    canvas.getObjects().forEach((object) => {
+      object.set({ dirty: true, objectCaching: false });
+      object.setCoords();
+    });
     canvas.discardActiveObject();
+    setSelectedObjectId("");
     canvas.calcOffset();
+    canvas.renderAll();
     canvas.requestRenderAll();
+    window.requestAnimationFrame(() => {
+      canvas.renderAll();
+    });
+    window.setTimeout(() => {
+      canvas.requestRenderAll();
+    }, 60);
     setSnapGuide({ x: false, y: false });
-  }, [activeSide, applyCanvasFrame, getCanvas]);
+  }, [activeSide, applyCanvasFrame, applyCanvasVisibility, getCanvas, isEditingExistingText, resetTextEditorState]);
 
   useEffect(() => {
     availableSides.forEach((side) => {
@@ -630,21 +1039,101 @@ const FabricDesigner = ({
     return Boolean(history && history.index < history.stack.length - 1);
   }, [activeSide, historyStamp]);
 
+  const resolveSelectedObject = useCallback(
+    (canvas) => {
+      if (!canvas) {
+        return null;
+      }
+
+      const activeObject = canvas.getActiveObject();
+      if (activeObject) {
+        return activeObject;
+      }
+
+      if (
+        editingTextTargetRef.current &&
+        canvas.getObjects().includes(editingTextTargetRef.current)
+      ) {
+        return editingTextTargetRef.current;
+      }
+
+      return null;
+    },
+    []
+  );
+
   const layers = useMemo(() => {
     const canvas = getCanvas(activeSide);
     if (!canvas) {
       return [];
     }
 
+    let photoCounter = 0;
     return canvas
       .getObjects()
       .map((object, index) => ({
         object,
         originalIndex: index,
-        label: getObjectLabel(object, index)
+        objectId: ensureObjectIdentity(object) || `layer-${index}`,
+        iconType: isTextObject(object) ? "text" : object?.type === "image" ? "image" : "object",
+        objectTypeLabel: isTextObject(object) ? "Text" : object?.type === "image" ? "Image" : "Object",
+        label: isTextObject(object)
+          ? getObjectLabel(object, index)
+          : object?.type === "image"
+            ? `Photo ${++photoCounter}`
+            : getObjectLabel(object, index)
       }))
       .reverse();
-  }, [activeSide, getCanvas, layerStamp]);
+  }, [activeSide, ensureObjectIdentity, getCanvas, layerStamp]);
+
+  const applyTextEditsToObject = useCallback(
+    (targetObject, { shouldPushHistory = true } = {}) => {
+      const canvas = getCanvas(activeSide);
+      if (!canvas || !targetObject || !isTextObject(targetObject)) {
+        return false;
+      }
+
+      targetObject.set({
+        text: String(textValue || "").trim(),
+        fontFamily: String(fontFamily || FONT_OPTIONS[0]),
+        fill: normalizeTextColor(fontColor),
+        fontSize: Number(fontSize) > 0 ? Number(fontSize) : 34,
+        fontWeight,
+        fontStyle,
+        underline: Boolean(textUnderline),
+        textAlign: textAlign || "left",
+        editable: true
+      });
+      applyInteractiveDefaults(targetObject);
+      targetObject.setCoords();
+      clampObjectToArea(targetObject, canvas, activeSide, { withSnap: false });
+      canvas.setActiveObject(targetObject);
+      setSelectedObjectId(ensureObjectIdentity(targetObject));
+      canvas.requestRenderAll();
+      setLayerStamp((prev) => prev + 1);
+
+      if (shouldPushHistory) {
+        pushHistory(activeSide);
+      }
+      return true;
+    },
+    [
+      activeSide,
+      applyInteractiveDefaults,
+      clampObjectToArea,
+      ensureObjectIdentity,
+      fontColor,
+      fontFamily,
+      fontSize,
+      fontStyle,
+      fontWeight,
+      getCanvas,
+      pushHistory,
+      textAlign,
+      textUnderline,
+      textValue
+    ]
+  );
 
   const addTextToCanvas = () => {
     const canvas = getCanvas(activeSide);
@@ -658,6 +1147,22 @@ const FabricDesigner = ({
       return;
     }
 
+    const activeObject = resolveSelectedObject(canvas);
+    const editingTarget =
+      (isTextObject(activeObject) ? activeObject : null) ||
+      (isTextObject(editingTextTargetRef.current) && canvas.getObjects().includes(editingTextTargetRef.current)
+        ? editingTextTargetRef.current
+        : null);
+
+    if (editingTarget) {
+      const updated = applyTextEditsToObject(editingTarget, { shouldPushHistory: true });
+      if (updated) {
+        onNotify?.({ type: "success", message: "Text updated successfully." });
+        closeTextEditorDrawer();
+      }
+      return;
+    }
+
     const area = getAreaForSide(activeSide);
     const textWidth = Math.min(Math.max(130, area.width * 0.65), area.width);
     const textObject = new fabric.IText(trimmed, {
@@ -667,26 +1172,77 @@ const FabricDesigner = ({
       fontFamily,
       fill: fontColor,
       fontSize: Number(fontSize),
+      fontWeight,
+      fontStyle,
+      underline: Boolean(textUnderline),
+      textAlign: textAlign || "left",
       editable: true,
       originX: "left",
-      originY: "top"
+      originY: "top",
+      giftObjectId: createObjectId()
     });
 
     applyInteractiveDefaults(textObject);
     canvas.add(textObject);
     canvas.bringToFront(textObject);
     canvas.setActiveObject(textObject);
+    setSelectedObjectId(ensureObjectIdentity(textObject));
     clampObjectToArea(textObject, canvas, activeSide, { withSnap: false });
     canvas.requestRenderAll();
-    setIsTextDrawerOpen(false);
+    onNotify?.({ type: "success", message: "Text added to design." });
+    closeTextEditorDrawer();
   };
 
-  const uploadImageToCanvas = (event) => {
+  const closeTextEditorDrawer = () => {
+    setIsTextDrawerOpen(false);
+    if (isEditingExistingText) {
+      resetTextEditorState();
+    }
+  };
+
+  const deleteEditingTextObject = () => {
+    const canvas = getCanvas(activeSide);
+    const activeObject = resolveSelectedObject(canvas);
+    const editingTarget =
+      (isTextObject(activeObject) ? activeObject : null) ||
+      (isTextObject(editingTextTargetRef.current) && canvas?.getObjects().includes(editingTextTargetRef.current)
+        ? editingTextTargetRef.current
+        : null);
+
+    if (!canvas || !editingTarget) {
+      onNotify?.({ type: "info", message: "Select a text object to delete." });
+      return;
+    }
+
+    canvas.remove(editingTarget);
+    canvas.discardActiveObject();
+    canvas.requestRenderAll();
+    setSelectedObjectId("");
+    setLayerStamp((prev) => prev + 1);
+    pushHistory(activeSide);
+    resetTextEditorState();
+    onNotify?.({ type: "success", message: "Text removed." });
+  };
+
+  const uploadImageToCanvas = async (event) => {
     const file = event.target.files?.[0];
     const canvas = getCanvas(activeSide);
 
     if (!file || !canvas) {
       return;
+    }
+
+    let assetId = "";
+    try {
+      assetId = await saveDesignAsset({
+        file,
+        productId
+      });
+    } catch (error) {
+      debugWarn("customizer", "Failed to persist uploaded image asset", {
+        side: activeSide,
+        error
+      });
     }
 
     const reader = new FileReader();
@@ -712,7 +1268,9 @@ const FabricDesigner = ({
           top: area.top + (area.height - renderHeight) / 2,
           angle: 0,
           originX: "left",
-          originY: "top"
+          originY: "top",
+          giftAssetId: assetId || "",
+          giftAssetProductId: String(productId || "")
         });
 
         imageObject.scale(scale);
@@ -720,6 +1278,7 @@ const FabricDesigner = ({
         canvas.add(imageObject);
         canvas.bringToFront(imageObject);
         canvas.setActiveObject(imageObject);
+        setSelectedObjectId(ensureObjectIdentity(imageObject));
         clampObjectToArea(imageObject, canvas, activeSide, { withSnap: false });
         canvas.requestRenderAll();
       }, { crossOrigin: "anonymous" });
@@ -751,7 +1310,7 @@ const FabricDesigner = ({
     restoreFromSnapshot(activeSide, history.stack[history.index]);
   };
 
-  const selectLayer = (originalIndex) => {
+  const selectLayer = useCallback((originalIndex) => {
     const canvas = getCanvas(activeSide);
     if (!canvas) {
       return;
@@ -763,12 +1322,33 @@ const FabricDesigner = ({
     }
 
     canvas.setActiveObject(target);
+    setSelectedObjectId(ensureObjectIdentity(target));
+    if (editingTextTargetRef.current && editingTextTargetRef.current !== target) {
+      resetTextEditorState();
+    }
     canvas.requestRenderAll();
-  };
+  }, [activeSide, ensureObjectIdentity, getCanvas, resetTextEditorState]);
 
-  const bringSelectedForward = () => {
+  const openLayerTextEditor = useCallback((originalIndex) => {
     const canvas = getCanvas(activeSide);
-    const activeObject = canvas?.getActiveObject();
+    if (!canvas) {
+      return;
+    }
+
+    const target = canvas.getObjects()[originalIndex];
+    if (!isTextObject(target)) {
+      return;
+    }
+
+    canvas.setActiveObject(target);
+    setSelectedObjectId(ensureObjectIdentity(target));
+    canvas.requestRenderAll();
+    openTextEditorForObject(target);
+  }, [activeSide, ensureObjectIdentity, getCanvas, openTextEditorForObject]);
+
+  const bringSelectedForward = useCallback(() => {
+    const canvas = getCanvas(activeSide);
+    const activeObject = resolveSelectedObject(canvas);
 
     if (!canvas || !activeObject) {
       onNotify?.({ type: "info", message: "Select an object from canvas first." });
@@ -779,11 +1359,11 @@ const FabricDesigner = ({
     canvas.requestRenderAll();
     pushHistory(activeSide);
     setLayerStamp((prev) => prev + 1);
-  };
+  }, [activeSide, getCanvas, onNotify, pushHistory, resolveSelectedObject]);
 
-  const sendSelectedBackward = () => {
+  const sendSelectedBackward = useCallback(() => {
     const canvas = getCanvas(activeSide);
-    const activeObject = canvas?.getActiveObject();
+    const activeObject = resolveSelectedObject(canvas);
 
     if (!canvas || !activeObject) {
       onNotify?.({ type: "info", message: "Select an object from canvas first." });
@@ -794,11 +1374,11 @@ const FabricDesigner = ({
     canvas.requestRenderAll();
     pushHistory(activeSide);
     setLayerStamp((prev) => prev + 1);
-  };
+  }, [activeSide, getCanvas, onNotify, pushHistory, resolveSelectedObject]);
 
-  const deleteSelectedLayer = () => {
+  const deleteSelectedLayer = useCallback(() => {
     const canvas = getCanvas(activeSide);
-    const activeObject = canvas?.getActiveObject();
+    const activeObject = resolveSelectedObject(canvas);
 
     if (!canvas || !activeObject) {
       onNotify?.({ type: "info", message: "Select an object to delete." });
@@ -808,8 +1388,38 @@ const FabricDesigner = ({
     canvas.remove(activeObject);
     canvas.discardActiveObject();
     canvas.requestRenderAll();
+    setSelectedObjectId("");
+    if (editingTextTargetRef.current === activeObject) {
+      resetTextEditorState();
+    }
     setLayerStamp((prev) => prev + 1);
-  };
+  }, [activeSide, getCanvas, onNotify, resetTextEditorState, resolveSelectedObject]);
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (event.key !== "Delete" && event.key !== "Backspace") {
+        return;
+      }
+
+      const target = event.target;
+      const tagName = String(target?.tagName || "").toLowerCase();
+      if (target?.isContentEditable || ["input", "textarea", "select"].includes(tagName)) {
+        return;
+      }
+
+      const canvas = getCanvas(activeSide);
+      if (!canvas?.getActiveObject()) {
+        return;
+      }
+
+      event.preventDefault();
+      deleteSelectedLayer();
+      onNotify?.({ type: "info", message: "Selected layer removed." });
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeSide, deleteSelectedLayer, getCanvas, onNotify]);
 
   const exportSide = useCallback(
     (side) => {
@@ -863,8 +1473,11 @@ const FabricDesigner = ({
   }, [activeSide, availableSides, exportSide, getCanvas, snapshotCanvas]);
 
   const handleSave = () => {
+    if (!onSave) {
+      return;
+    }
     const payload = collectCanvasState();
-    onSave?.(payload);
+    onSave(payload);
     onNotify?.({ type: "success", message: "Design saved successfully." });
   };
 
@@ -874,7 +1487,6 @@ const FabricDesigner = ({
       onNotify?.({ type: "error", message: "Add at least one design element before checkout." });
       return;
     }
-    onSave?.(payload);
     onProceedCheckout?.(payload);
   };
 
@@ -890,6 +1502,15 @@ const FabricDesigner = ({
       label: "Text",
       icon: "text",
       onClick: () => {
+        const canvas = getCanvas(activeSide);
+        const activeObject = canvas?.getActiveObject();
+        if (isTextObject(activeObject)) {
+          openTextEditorForObject(activeObject);
+          return;
+        }
+        if (!isEditingExistingText) {
+          setTextValue("Gift vibes");
+        }
         setIsLayersDrawerOpen(false);
         setIsTextDrawerOpen(true);
       }
@@ -914,19 +1535,16 @@ const FabricDesigner = ({
         }
         onNotify?.({ type: "info", message: "Product panel is unavailable." });
       }
-    },
-    {
-      key: "undo",
-      label: "Undo",
-      icon: "undo",
-      onClick: runUndo
     }
   ];
 
   const activeArea = getAreaForSide(activeSide);
+  const activeBottomSheet = isTextDrawerOpen ? "text" : isLayersDrawerOpen ? "layers" : "";
+
+  const bottomSheetOffset = "calc(8.4rem + env(safe-area-inset-bottom))";
 
   return (
-    <section className="space-y-3 overflow-x-hidden pb-52">
+    <section className="space-y-3 overflow-x-hidden pb-40">
       <input
         ref={fileInputRef}
         type="file"
@@ -1078,9 +1696,268 @@ const FabricDesigner = ({
         </p>
       </div>
 
+      <AnimatePresence initial={false}>
+        {activeBottomSheet ? (
+          <>
+            <motion.button
+              type="button"
+              aria-label={activeBottomSheet === "layers" ? "Close layers panel" : "Text panel backdrop"}
+              aria-hidden={activeBottomSheet === "text"}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.16 }}
+              className={`fixed inset-x-0 top-0 z-[56] bg-slate-900/18 ${
+                activeBottomSheet === "text" ? "pointer-events-none" : ""
+              }`}
+              style={{ bottom: bottomSheetOffset }}
+              onClick={() => {
+                if (activeBottomSheet === "layers") {
+                  setIsLayersDrawerOpen(false);
+                }
+              }}
+            />
+
+            <motion.div
+              key={`sheet-${activeBottomSheet}`}
+              initial={{ opacity: 0, y: 28 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 20 }}
+              transition={{ duration: 0.22 }}
+              className="fixed inset-x-0 z-[60] px-3"
+              style={{ bottom: bottomSheetOffset }}
+            >
+              <div className="mx-auto w-full max-w-xl max-h-[58vh] overflow-y-auto overscroll-contain rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
+                {activeBottomSheet === "text" ? (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+                        {isEditingExistingText ? "Edit Text" : "Add Text"}
+                      </p>
+                      <SheetCloseButton onClick={closeTextEditorDrawer} label="Close text editor" />
+                    </div>
+
+                    <input
+                      value={textValue}
+                      onChange={(event) => setTextValue(event.target.value)}
+                      className="mt-2 min-h-11 w-full rounded-xl border border-slate-300 px-3 text-sm text-slate-700 outline-none ring-brand-300 focus:ring"
+                      placeholder={isEditingExistingText ? "Update your message" : "Type your message"}
+                    />
+
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      <select
+                        value={fontFamily}
+                        onChange={(event) => setFontFamily(event.target.value)}
+                        className="min-h-11 rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-300 focus:ring"
+                      >
+                        {FONT_OPTIONS.map((font) => (
+                          <option key={font} value={font}>
+                            {font}
+                          </option>
+                        ))}
+                      </select>
+
+                      <input
+                        type="color"
+                        value={fontColor}
+                        onChange={(event) => setFontColor(event.target.value)}
+                        className="h-11 rounded-xl border border-slate-300 p-1"
+                      />
+                    </div>
+
+                    <label className="mt-2 block text-xs font-semibold text-slate-600">
+                      Font Size: {fontSize}px
+                      <input
+                        type="range"
+                        min={14}
+                        max={92}
+                        value={fontSize}
+                        onChange={(event) => setFontSize(Number(event.target.value))}
+                        className="mt-1 w-full"
+                      />
+                    </label>
+
+                    <div className="mt-2 grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setFontWeight((prev) => (prev === "bold" ? "normal" : "bold"))}
+                        className={`inline-flex min-h-10 items-center justify-center rounded-xl border px-3 text-xs font-semibold transition ${
+                          fontWeight === "bold"
+                            ? "border-brand-300 bg-brand-50 text-brand-700"
+                            : "border-slate-300 bg-white text-slate-700"
+                        }`}
+                      >
+                        Bold
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setFontStyle((prev) => (prev === "italic" ? "normal" : "italic"))}
+                        className={`inline-flex min-h-10 items-center justify-center rounded-xl border px-3 text-xs font-semibold transition ${
+                          fontStyle === "italic"
+                            ? "border-brand-300 bg-brand-50 text-brand-700"
+                            : "border-slate-300 bg-white text-slate-700"
+                        }`}
+                      >
+                        Italic
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTextUnderline((prev) => !prev)}
+                        className={`inline-flex min-h-10 items-center justify-center rounded-xl border px-3 text-xs font-semibold transition ${
+                          textUnderline
+                            ? "border-brand-300 bg-brand-50 text-brand-700"
+                            : "border-slate-300 bg-white text-slate-700"
+                        }`}
+                      >
+                        Underline
+                      </button>
+                    </div>
+
+                    <div className="mt-2 grid grid-cols-3 gap-2">
+                      {["left", "center", "right"].map((align) => (
+                        <button
+                          key={align}
+                          type="button"
+                          onClick={() => setTextAlign(align)}
+                          className={`inline-flex min-h-10 items-center justify-center rounded-xl border px-3 text-xs font-semibold uppercase transition ${
+                            textAlign === align
+                              ? "border-brand-300 bg-brand-50 text-brand-700"
+                              : "border-slate-300 bg-white text-slate-700"
+                          }`}
+                        >
+                          {align}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="mt-2 grid grid-cols-1 gap-2">
+                      <button
+                        type="button"
+                        onClick={addTextToCanvas}
+                        className="inline-flex min-h-11 items-center justify-center rounded-xl bg-brand-600 px-4 text-sm font-semibold text-white transition hover:bg-brand-700"
+                      >
+                        {isEditingExistingText ? "Apply Changes" : "Add to Design"}
+                      </button>
+                    </div>
+
+                    {isEditingExistingText ? (
+                      <button
+                        type="button"
+                        onClick={deleteEditingTextObject}
+                        className="mt-2 inline-flex min-h-10 w-full items-center justify-center rounded-xl border border-rose-200 bg-rose-50 px-3 text-xs font-semibold text-rose-700 transition hover:bg-rose-100"
+                      >
+                        Delete Text
+                      </button>
+                    ) : null}
+                  </>
+                ) : null}
+
+                {activeBottomSheet === "layers" ? (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Layers</p>
+                      <button
+                        type="button"
+                        onClick={() => setIsLayersDrawerOpen(false)}
+                        className="text-xs font-semibold text-slate-500 hover:text-slate-700"
+                      >
+                        Close
+                      </button>
+                    </div>
+
+                    <div className="mt-2 max-h-40 space-y-1 overflow-y-auto pr-1">
+                      {layers.length === 0 ? (
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                          No objects yet.
+                        </div>
+                      ) : (
+                        layers.map((layer) => {
+                          const isSelected = selectedObjectId && selectedObjectId === layer.objectId;
+                          const canEditText = isSelected && layer.iconType === "text";
+
+                          return (
+                            <div key={`${layer.objectId}-${layer.originalIndex}`} className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => selectLayer(layer.originalIndex)}
+                                className={`min-w-0 flex-1 rounded-xl border px-3 py-2 text-left transition ${
+                                  isSelected
+                                    ? "border-brand-300 bg-brand-50/70 text-brand-800"
+                                    : "border-slate-200 text-slate-700 hover:border-brand-300 hover:text-brand-700"
+                                }`}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className={`inline-flex h-6 w-6 items-center justify-center rounded-lg border ${
+                                      isSelected
+                                        ? "border-brand-300 bg-white text-brand-700"
+                                        : "border-slate-200 bg-slate-50 text-slate-500"
+                                    }`}
+                                  >
+                                    <LayerIcon type={layer.iconType} />
+                                  </span>
+                                  <div className="min-w-0">
+                                    <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-500">
+                                      {layer.objectTypeLabel}
+                                    </p>
+                                    <p className="truncate text-xs font-semibold">{layer.label}</p>
+                                  </div>
+                                </div>
+                              </button>
+
+                              {canEditText ? (
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    openLayerTextEditor(layer.originalIndex);
+                                  }}
+                                  className="inline-flex min-h-10 items-center justify-center rounded-xl border border-brand-200 bg-white px-3 text-xs font-semibold text-brand-700 transition hover:bg-brand-50"
+                                >
+                                  Edit
+                                </button>
+                              ) : null}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+
+                    <div className="mt-2 grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={bringSelectedForward}
+                        className="inline-flex min-h-10 items-center justify-center rounded-xl border border-slate-300 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+                      >
+                        Up
+                      </button>
+                      <button
+                        type="button"
+                        onClick={sendSelectedBackward}
+                        className="inline-flex min-h-10 items-center justify-center rounded-xl border border-slate-300 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+                      >
+                        Down
+                      </button>
+                      <button
+                        type="button"
+                        onClick={deleteSelectedLayer}
+                        className="inline-flex min-h-10 items-center justify-center rounded-xl border border-rose-200 bg-rose-50 text-xs font-semibold text-rose-700 transition hover:bg-rose-100"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            </motion.div>
+          </>
+        ) : null}
+      </AnimatePresence>
+
       <div className="fixed inset-x-0 bottom-0 z-50 border-t border-slate-200 bg-white/97 backdrop-blur">
         <div className="mx-auto w-full max-w-xl px-3 pb-[calc(0.65rem+env(safe-area-inset-bottom))] pt-2">
-          <div className="grid grid-cols-5 gap-2">
+          <div className="grid grid-cols-4 gap-2">
             {toolbarButtons.map((button) => (
               <button
                 key={button.key}
@@ -1094,14 +1971,16 @@ const FabricDesigner = ({
             ))}
           </div>
 
-          <div className="mt-2 grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={handleSave}
-              className="inline-flex min-h-11 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-            >
-              Save Draft
-            </button>
+          <div className={`mt-2 grid gap-2 ${onSave ? "grid-cols-2" : "grid-cols-1"}`}>
+            {onSave ? (
+              <button
+                type="button"
+                onClick={handleSave}
+                className="inline-flex min-h-11 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+              >
+                Save
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={handleProceedCheckout}
@@ -1110,142 +1989,6 @@ const FabricDesigner = ({
               Add to Cart
             </button>
           </div>
-
-          <AnimatePresence initial={false}>
-            {isTextDrawerOpen ? (
-              <motion.div
-                key="text-sheet"
-                initial={{ opacity: 0, y: 24 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 16 }}
-                transition={{ duration: 0.22 }}
-                className="mt-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-soft"
-              >
-                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Add Text</p>
-                <input
-                  value={textValue}
-                  onChange={(event) => setTextValue(event.target.value)}
-                  className="mt-2 min-h-11 w-full rounded-xl border border-slate-300 px-3 text-sm text-slate-700 outline-none ring-brand-300 focus:ring"
-                  placeholder="Type your message"
-                />
-
-                <div className="mt-2 grid grid-cols-2 gap-2">
-                  <select
-                    value={fontFamily}
-                    onChange={(event) => setFontFamily(event.target.value)}
-                    className="min-h-11 rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-300 focus:ring"
-                  >
-                    {FONT_OPTIONS.map((font) => (
-                      <option key={font} value={font}>
-                        {font}
-                      </option>
-                    ))}
-                  </select>
-
-                  <input
-                    type="color"
-                    value={fontColor}
-                    onChange={(event) => setFontColor(event.target.value)}
-                    className="h-11 rounded-xl border border-slate-300 p-1"
-                  />
-                </div>
-
-                <label className="mt-2 block text-xs font-semibold text-slate-600">
-                  Font Size: {fontSize}px
-                  <input
-                    type="range"
-                    min={14}
-                    max={92}
-                    value={fontSize}
-                    onChange={(event) => setFontSize(Number(event.target.value))}
-                    className="mt-1 w-full"
-                  />
-                </label>
-
-                <div className="mt-2 grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={addTextToCanvas}
-                    className="inline-flex min-h-11 items-center justify-center rounded-xl bg-brand-600 px-4 text-sm font-semibold text-white transition hover:bg-brand-700"
-                  >
-                    Add to Design
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setIsTextDrawerOpen(false)}
-                    className="inline-flex min-h-11 items-center justify-center rounded-xl border border-slate-300 px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-                  >
-                    Close
-                  </button>
-                </div>
-              </motion.div>
-            ) : null}
-
-            {isLayersDrawerOpen ? (
-              <motion.div
-                key="layers-sheet"
-                initial={{ opacity: 0, y: 24 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 16 }}
-                transition={{ duration: 0.2 }}
-                className="mt-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-soft"
-              >
-                <div className="flex items-center justify-between">
-                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Layers</p>
-                  <button
-                    type="button"
-                    onClick={() => setIsLayersDrawerOpen(false)}
-                    className="text-xs font-semibold text-slate-500 hover:text-slate-700"
-                  >
-                    Close
-                  </button>
-                </div>
-
-                <div className="mt-2 max-h-36 space-y-1 overflow-y-auto pr-1">
-                  {layers.length === 0 ? (
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                      No objects yet.
-                    </div>
-                  ) : (
-                    layers.map((layer) => (
-                      <button
-                        key={`${layer.label}-${layer.originalIndex}`}
-                        type="button"
-                        onClick={() => selectLayer(layer.originalIndex)}
-                        className="w-full rounded-xl border border-slate-200 px-3 py-2 text-left text-xs font-semibold text-slate-700 transition hover:border-brand-300 hover:text-brand-700"
-                      >
-                        {layer.label}
-                      </button>
-                    ))
-                  )}
-                </div>
-
-                <div className="mt-2 grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={bringSelectedForward}
-                    className="inline-flex min-h-10 items-center justify-center rounded-xl border border-slate-300 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
-                  >
-                    Up
-                  </button>
-                  <button
-                    type="button"
-                    onClick={sendSelectedBackward}
-                    className="inline-flex min-h-10 items-center justify-center rounded-xl border border-slate-300 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
-                  >
-                    Down
-                  </button>
-                  <button
-                    type="button"
-                    onClick={deleteSelectedLayer}
-                    className="inline-flex min-h-10 items-center justify-center rounded-xl border border-rose-200 bg-rose-50 text-xs font-semibold text-rose-700 transition hover:bg-rose-100"
-                  >
-                    Delete
-                  </button>
-                </div>
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
         </div>
       </div>
     </section>

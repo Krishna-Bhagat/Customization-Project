@@ -121,26 +121,6 @@ export const mergeGuestCart = async ({ token, items }) => {
   return data;
 };
 
-export const fetchDrafts = async (token) => {
-  const { data } = await apiClient.get("/drafts", withAuth(token));
-  return data;
-};
-
-export const fetchDraftByProduct = async ({ token, productId }) => {
-  const { data } = await apiClient.get(`/drafts/${productId}`, withAuth(token));
-  return data;
-};
-
-export const saveDraft = async ({ token, productId, payload }) => {
-  const { data } = await apiClient.put(`/drafts/${productId}`, payload, withAuth(token));
-  return data;
-};
-
-export const deleteDraft = async ({ token, productId }) => {
-  const { data } = await apiClient.delete(`/drafts/${productId}`, withAuth(token));
-  return data;
-};
-
 export const createUserOrder = async ({ token, payload }) => {
   const { data } = await apiClient.post("/orders", payload, withAuth(token));
   return data;
